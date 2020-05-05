@@ -116,7 +116,7 @@ func globalBoringSSLPassphraseCallback(buf: UnsafeMutablePointer<CChar>?,
 /// to obtain an in-memory representation of a key from a buffer of
 /// bytes or from a file path.
 public class NIOSSLPrivateKey {
-    internal let _ref: UnsafeMutableRawPointer /*<EVP_PKEY>*/
+    public let _ref: UnsafeMutableRawPointer /*<EVP_PKEY>*/
 
     internal var ref: UnsafeMutablePointer<EVP_PKEY> {
         return self._ref.assumingMemoryBound(to: EVP_PKEY.self)
