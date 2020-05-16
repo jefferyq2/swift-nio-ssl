@@ -12,11 +12,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.1) && compiler(<5.4)
-@_implementationOnly import CNIOBoringSSL
-#else
+//#if compiler(>=5.1) && compiler(<5.4)
+//@_implementationOnly import CNIOBoringSSL
+//#else
+//import CNIOBoringSSL
+//#endif
+
 import CNIOBoringSSL
-#endif
+import CNIOBoringSSLShims
+import NIO
 
 /// An `NIOSSLPassphraseCallback` is a callback that will be invoked by NIOSSL when it needs to
 /// get access to a private key that is stored in encrypted form.
@@ -280,7 +284,7 @@ public class NIOSSLPrivateKey {
     ///
     /// In general, however, this function should be avoided in favour of one of the convenience
     /// initializers, which ensure that the lifetime of the EVP_PKEY object is better-managed.
-    static internal func fromUnsafePointer(takingOwnership pointer: UnsafeMutablePointer<EVP_PKEY>) -> NIOSSLPrivateKey {
+    static public func fromUnsafePointer(takingOwnership pointer: UnsafeMutablePointer<EVP_PKEY>) -> NIOSSLPrivateKey {
         return NIOSSLPrivateKey(withReference: pointer)
     }
 
