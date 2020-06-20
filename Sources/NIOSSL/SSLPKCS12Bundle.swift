@@ -45,7 +45,7 @@ public struct NIOSSLPKCS12Bundle {
     public let certificateChain: [NIOSSLCertificate]
     public let privateKey: NIOSSLPrivateKey
 
-    private init<Bytes: Collection>(ref: OpaquePointer, passphrase: Bytes?) throws where Bytes.Element == UInt8 {
+    public init<Bytes: Collection>(ref: OpaquePointer, passphrase: Bytes?) throws where Bytes.Element == UInt8 {
         var pkey: UnsafeMutablePointer<EVP_PKEY>? = nil
         var cert: UnsafeMutablePointer<X509>? = nil
         var caCerts: OpaquePointer? = nil
