@@ -53,7 +53,13 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
     private var didDeliverData: Bool = false
     private var storedContext: ChannelHandlerContext? = nil
     private var shutdownTimeout: TimeAmount
-    
+
+    // MARK: - Proxyman Start
+
+    public var connectionOnComplete: ((_ tlsVersion: String?) -> Void)?
+
+    // MARK: - Proxyman End
+
     internal init(connection: SSLConnection, shutdownTimeout: TimeAmount) {
         self.connection = connection
         self.bufferedWrites = MarkedCircularBuffer(initialCapacity: 96)  // 96 brings the total size of the buffer to just shy of one page
@@ -232,6 +238,11 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
             state = .active
             writeDataToNetwork(context: context, promise: nil)
+
+            // MARK: - Proxyman Start
+            let tlsVersion = connection.getTLSVersion()
+            connectionOnComplete?(tlsVersion)
+            // MARK: - Proxyman End
 
             // TODO(cory): This event should probably fire out of the BoringSSL info callback.
             let negotiatedProtocol = connection.getAlpnProtocol()
