@@ -522,3 +522,15 @@ extension SSLConnection.PeerCertificateChainBuffers: RandomAccessCollection {
         return UnsafeRawBufferPointer(bufferDataPointer)
     }
 }
+
+// MARK: - Proxyman
+
+extension SSLConnection {
+
+    func getTLSVersion() -> String? {
+        guard let rawString = CNIOBoringSSL_SSL_get_version(ssl) else {
+            return nil
+        }
+        return String(cString: rawString)
+    }
+}
