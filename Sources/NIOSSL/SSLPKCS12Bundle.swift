@@ -62,7 +62,7 @@ public struct NIOSSLPKCS12Bundle {
         // Successfully parsed, let's unpack. The key and cert are mandatory,
         // the ca stack is not.
         guard let actualCert = cert, let actualKey = pkey else {
-            fatalError("Failed to obtain cert and pkey from a PKC12 file")
+            throw NIOSSLError.failCertificate("Failed to obtain cert and pkey from a PKC12 file")
         }
 
         let certStackSize = caCerts.map { CNIOBoringSSL_sk_X509_num($0) } ?? 0
@@ -89,7 +89,7 @@ public struct NIOSSLPKCS12Bundle {
     ///     - buffer: The bytes of the PKCS#12 bundle.
     ///     - passphrase: The passphrase used for the bundle, as a sequence of UTF-8 bytes.
     public init<Bytes: Collection>(buffer: [UInt8], passphrase: Bytes?) throws where Bytes.Element == UInt8 {
-        guard boringSSLIsInitialized else { fatalError("Failed to initialize BoringSSL") }
+        guard boringSSLIsInitialized else { throw NIOSSLError.failCertificate("Failed to initialize BoringSSL") }
         
         let p12 = buffer.withUnsafeBytes { pointer -> OpaquePointer? in
             let bio = CNIOBoringSSL_BIO_new_mem_buf(pointer.baseAddress, CInt(pointer.count))!
@@ -116,7 +116,7 @@ public struct NIOSSLPKCS12Bundle {
     ///     - file: The path to the PKCS#12 bundle on disk.
     ///     - passphrase: The passphrase used for the bundle, as a sequence of UTF-8 bytes.
     public init<Bytes: Collection>(file: String, passphrase: Bytes?) throws where Bytes.Element == UInt8 {
-        guard boringSSLIsInitialized else { fatalError("Failed to initialize BoringSSL") }
+        guard boringSSLIsInitialized else { throw NIOSSLError.failCertificate("Failed to initialize BoringSSL") }
 
         let fileObject = try Posix.fopen(file: file, mode: "rb")
         defer {

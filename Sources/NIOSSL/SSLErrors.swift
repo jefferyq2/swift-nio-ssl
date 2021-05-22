@@ -60,6 +60,9 @@ public enum NIOSSLError: Error {
     case cannotFindPeerIP
     case readInInvalidTLSState
     case uncleanShutdown
+
+    // proxyman
+    case failCertificate(String)
 }
 
 extension NIOSSLError: Equatable {}
