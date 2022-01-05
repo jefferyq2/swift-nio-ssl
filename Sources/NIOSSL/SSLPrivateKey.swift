@@ -126,7 +126,7 @@ public class NIOSSLPrivateKey {
 
     public let representation: Representation
 
-    internal func withUnsafeMutableEVPPKEYPointer<ReturnType>(_ body: (UnsafeMutablePointer<EVP_PKEY>) throws -> ReturnType) rethrows -> ReturnType {
+    public func withUnsafeMutableEVPPKEYPointer<ReturnType>(_ body: (UnsafeMutablePointer<EVP_PKEY>) throws -> ReturnType) rethrows -> ReturnType {
         guard case .native(let pointer) = self.representation else {
             preconditionFailure()
         }
