@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -13,7 +13,8 @@
 //===----------------------------------------------------------------------===//
 
 import XCTest
-import NIO
+import NIOCore
+import NIOEmbedded
 @testable import NIOSSL
 
 func connectInMemory(client: EmbeddedChannel, server: EmbeddedChannel) throws {
@@ -1008,9 +1009,9 @@ final class UnwrappingTests: XCTestCase {
             try interactInMemory(clientChannel: clientChannel, serverChannel: serverChannel)
         } catch {
             switch error as? NIOSSLError {
-            case .some(.handshakeFailed):
-                // Expected to fall into .handshakeFailed
-                break
+            case .some(.handshakeFailed(let innerError)):
+                // Expected to fall into .handshakeFailed with .eofDuringHandshake
+                XCTAssertEqual(innerError, .sslError([.eofDuringHandshake]))
             default:
                 XCTFail("Unexpected error: \(error)")
             }

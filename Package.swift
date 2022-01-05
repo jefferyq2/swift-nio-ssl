@@ -3,7 +3,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -26,7 +26,7 @@ import class Foundation.ProcessInfo
 // Sources/CNIOBoringSSL directory. The source repository is at
 // https://boringssl.googlesource.com/boringssl.
 //
-// BoringSSL Commit: 2e68a05c9943a8dec1758d4a393b2ae906fd3295
+// BoringSSL Commit: 2042972e8458833714bce23386931b1c79978439
 
 /// This function generates the dependencies we want to express.
 ///
@@ -36,7 +36,7 @@ import class Foundation.ProcessInfo
 func generateDependencies() -> [Package.Dependency] {
     if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
         return [
-            .package(url: "https://github.com/apple/swift-nio.git", from: "2.30.0"),
+            .package(url: "https://github.com/apple/swift-nio.git", from: "2.32.0"),
         ]
     } else {
         return [
@@ -69,6 +69,7 @@ MANGLE_END */
                 "CNIOBoringSSL",
                 "CNIOBoringSSLShims",
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOTLS", package: "swift-nio"),
             ]),
@@ -76,14 +77,16 @@ MANGLE_END */
             name: "NIOTLSServer",
             dependencies: [
                 "NIOSSL",
-                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ]),
         .target(
             name: "NIOSSLHTTP1Client",
             dependencies: [
                 "NIOSSL",
-                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
             ]),
@@ -91,13 +94,17 @@ MANGLE_END */
             name: "NIOSSLPerformanceTester",
             dependencies: [
                 "NIOSSL",
-                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOTLS", package: "swift-nio"),
             ]),
         .testTarget(
             name: "NIOSSLTests",
             dependencies: [
                 "NIOSSL",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOTLS", package: "swift-nio"),
             ]),
     ],

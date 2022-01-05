@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -11,13 +11,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-import NIO
-
-#if compiler(>=5.1)
+import NIOCore
 @_implementationOnly import CNIOBoringSSL
-#else
-import CNIOBoringSSL
-#endif
 
 // We can only use Security.framework to validate TLS certificates on Apple platforms.
 #if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
@@ -26,25 +21,10 @@ import Foundation
 import Security
 
 extension SSLConnection {
-    func performSecurityFrameworkValidation(promise: EventLoopPromise<NIOSSLVerificationResult>) {
+    func performSecurityFrameworkValidation(promise: EventLoopPromise<NIOSSLVerificationResult>, peerCertificates: [SecCertificate]) {
         do {
             guard case .default = self.parentContext.configuration.trustRoots ?? .default else {
                 preconditionFailure("This callback should only be used if we are using the system-default trust.")
-            }
-
-            // Ok, time to kick off a validation. Let's get some certificate buffers.
-            let peerCertificates: [SecCertificate] = try self.withPeerCertificateChainBuffers { buffers in
-                guard let buffers = buffers else {
-                    throw NIOSSLError.unableToValidateCertificate
-                }
-
-                return try buffers.map { buffer in
-                    let data = Data(bytes: buffer.baseAddress!, count: buffer.count)
-                    guard let cert = SecCertificateCreateWithData(nil, data as CFData) else {
-                        throw NIOSSLError.unableToValidateCertificate
-                    }
-                    return cert
-                }
             }
 
             // This force-unwrap is safe as we must have decided if we're a client or a server before validation.
@@ -69,11 +49,11 @@ extension SSLConnection {
                 return secCert
             }
             if !additionalAnchorCertificates.isEmpty {
-                // To use additional anchors _and_ the built-in ones we must reenable the built-in ones expicitly.
-                guard SecTrustSetAnchorCertificatesOnly(actualTrust, false) == errSecSuccess else {
+                guard SecTrustSetAnchorCertificates(actualTrust, additionalAnchorCertificates as CFArray) == errSecSuccess else {
                     throw NIOSSLError.failedToLoadCertificate
                 }
-                guard SecTrustSetAnchorCertificates(actualTrust, additionalAnchorCertificates as CFArray) == errSecSuccess else {
+                // To use additional anchors _and_ the built-in ones we must reenable the built-in ones expicitly.
+                guard SecTrustSetAnchorCertificatesOnly(actualTrust, false) == errSecSuccess else {
                     throw NIOSSLError.failedToLoadCertificate
                 }
             }
@@ -115,6 +95,24 @@ extension EventLoopPromise where Value == NIOSSLVerificationResult {
         default:
             // Oops, we failed.
             self.succeed(.failed)
+        }
+    }
+}
+
+extension SSLConnection {
+    func getPeerCertificatesAsSecCertificate() throws -> [SecCertificate] {
+        try self.withPeerCertificateChainBuffers { buffers in
+            guard let buffers = buffers else {
+                throw NIOSSLError.unableToValidateCertificate
+            }
+
+            return try buffers.map { buffer in
+                let data = Data(bytes: buffer.baseAddress!, count: buffer.count)
+                guard let cert = SecCertificateCreateWithData(nil, data as CFData) else {
+                    throw NIOSSLError.unableToValidateCertificate
+                }
+                return cert
+            }
         }
     }
 }

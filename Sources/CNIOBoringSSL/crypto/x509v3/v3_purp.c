@@ -64,10 +64,10 @@
 #include <CNIOBoringSSL_mem.h>
 #include <CNIOBoringSSL_obj.h>
 #include <CNIOBoringSSL_thread.h>
-#include <CNIOBoringSSL_x509_vfy.h>
 #include <CNIOBoringSSL_x509v3.h>
 
 #include "../internal.h"
+#include "../x509/internal.h"
 #include "internal.h"
 
 #define V1_ROOT (EXFLAG_V1|EXFLAG_SS)

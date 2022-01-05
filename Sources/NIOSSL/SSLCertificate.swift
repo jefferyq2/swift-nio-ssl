@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -12,21 +12,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-//#if compiler(>=5.1) && compiler(<5.4)
-//@_implementationOnly import CNIOBoringSSL
-//@_implementationOnly import CNIOBoringSSLShims
-//#else
-//import CNIOBoringSSL
-//import CNIOBoringSSLShims
-//#endif
-
-// Import all (header + implementation)
-// Otherwise, this following func is error
-// static public func fromUnsafePointer(takingOwnership pointer: UnsafeMutablePointer<EVP_PKEY>) -> NIOSSLPrivateKey
-
 import CNIOBoringSSL
 import CNIOBoringSSLShims
-import NIO
+import NIOCore
+
+#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+import Darwin.C
+#elseif os(Linux) || os(FreeBSD) || os(Android)
+import Glibc
+#else
+#error("unsupported os")
+#endif
+
 #if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
 import struct Darwin.time_t
 #elseif canImport(Glibc)
@@ -43,10 +40,17 @@ import struct Glibc.time_t
 /// to obtain an in-memory representation of a TLS certificate from a buffer of
 /// bytes or from a file path.
 public class NIOSSLCertificate {
-    public let _ref: UnsafeMutableRawPointer/*<X509>*/
+    
+    public let _ref: OpaquePointer/*<X509>*/
 
-    internal var ref: UnsafeMutablePointer<X509> {
-        return self._ref.assumingMemoryBound(to: X509.self)
+    @inlinable
+    public func withUnsafeMutableX509Pointer<ResultType>(_ body: (OpaquePointer) throws -> ResultType) rethrows -> ResultType {
+        return try body(self._ref)
+    }
+
+    // Internal to this class we can just access the ref directly.
+    private var ref: OpaquePointer {
+        return self._ref
     }
 
     internal enum AlternativeName {
@@ -64,8 +68,8 @@ public class NIOSSLCertificate {
         return Array(UnsafeBufferPointer(start: serialNumber.pointee.data, count: Int(serialNumber.pointee.length)))
     }
 
-    private init(withOwnedReference ref: UnsafeMutablePointer<X509>) {
-        self._ref = UnsafeMutableRawPointer(ref) // erasing the type for @_implementationOnly import CNIOBoringSSL
+    private init(withOwnedReference ref: OpaquePointer) {
+        self._ref = ref
     }
 
     /// Create a NIOSSLCertificate from a file at a given path in either PEM or
@@ -78,7 +82,7 @@ public class NIOSSLCertificate {
             fclose(fileObject)
         }
 
-        let x509: UnsafeMutablePointer<X509>?
+        let x509: OpaquePointer?
         switch format {
         case .pem:
             x509 = CNIOBoringSSL_PEM_read_X509(fileObject, nil, nil, nil)
@@ -105,7 +109,7 @@ public class NIOSSLCertificate {
     /// Create a NIOSSLCertificate from a buffer of bytes in either PEM or
     /// DER format.
     public convenience init(bytes: [UInt8], format: NIOSSLSerializationFormats) throws {
-        let ref = bytes.withUnsafeBytes { (ptr) -> UnsafeMutablePointer<X509>? in
+        let ref = bytes.withUnsafeBytes { (ptr) -> OpaquePointer? in
             let bio = CNIOBoringSSL_BIO_new_mem_buf(ptr.baseAddress, CInt(ptr.count))!
 
             defer {
@@ -140,7 +144,7 @@ public class NIOSSLCertificate {
             CNIOBoringSSL_BIO_free(bio)
         }
 
-        let ref: UnsafeMutablePointer<X509>?
+        let ref: OpaquePointer?
 
         switch format {
         case .pem:
@@ -166,7 +170,7 @@ public class NIOSSLCertificate {
     ///
     /// In general, however, this function should be avoided in favour of one of the convenience
     /// initializers, which ensure that the lifetime of the `X509` object is better-managed.
-    public static func fromUnsafePointer(takingOwnership pointer: UnsafeMutablePointer<X509>) -> NIOSSLCertificate {
+    public static func fromUnsafePointer(takingOwnership pointer: OpaquePointer) -> NIOSSLCertificate {
         return NIOSSLCertificate(withOwnedReference: pointer)
     }
 
@@ -176,6 +180,13 @@ public class NIOSSLCertificate {
             return nil
         }
         return SubjectAltNameSequence(nameStack: OpaquePointer(sanExtension))
+    }
+    
+    /// Extracts the SHA1 hash of the subject name before it has been truncated.
+    ///
+    /// - returns: Numeric hash of the subject name.
+    internal func getSubjectNameHash() -> UInt {
+        return CNIOBoringSSL_X509_subject_name_hash(self.ref)
     }
 
     /// Returns the commonName field in the Subject of this certificate.

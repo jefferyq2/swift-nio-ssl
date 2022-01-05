@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -12,13 +12,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-import NIO
-#if compiler(>=5.1)
+import NIOCore
 @_implementationOnly import CNIOBoringSSL
 @_implementationOnly import CNIOBoringSSLShims
+
+#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+import Darwin.C
+#elseif os(Linux) || os(FreeBSD) || os(Android)
+import Glibc
 #else
-import CNIOBoringSSL
-import CNIOBoringSSLShims
+#error("unsupported os")
 #endif
 
 // This is a neat trick. Swift lazily initializes module-globals based on when they're first
@@ -38,7 +41,7 @@ internal enum FileSystemObject {
             return nil
         }
 
-#if os(Android)
+#if os(Android) && arch(arm)
         return (statObj.st_mode & UInt32(Glibc.S_IFDIR)) != 0 ? .directory : .file
 #else
         return (statObj.st_mode & S_IFDIR) != 0 ? .directory : .file
@@ -205,7 +208,7 @@ public final class NIOSSLContext {
         }
         
         // Configure signing algorithms
-        if let signingSignatureAlgorithms = configuration.signingSignatureAlgorithms {
+        if let signingSignatureAlgorithms = configuration.resolvedSigningSignatureAlgorithms {
             returnCode = signingSignatureAlgorithms
                 .map { $0.rawValue }
                 .withUnsafeBufferPointer { algo in
@@ -318,7 +321,13 @@ public final class NIOSSLContext {
         #if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
         switch self.configuration.trustRoots {
         case .some(.default), .none:
-            conn.setCustomVerificationCallback(CustomVerifyManager(callback: { conn.performSecurityFrameworkValidation(promise: $0) }))
+            conn.setCustomVerificationCallback(CustomVerifyManager(callback: {
+                do {
+                    conn.performSecurityFrameworkValidation(promise: $0, peerCertificates: try conn.getPeerCertificatesAsSecCertificate())
+                } catch {
+                    $0.fail(error)
+                }
+            }))
         case .some(.certificates), .some(.file):
             break
         }
@@ -357,21 +366,34 @@ extension NIOSSLContext {
     }
 
     private static func setLeafCertificate(_ cert: NIOSSLCertificate, context: OpaquePointer) throws {
-        let rc = CNIOBoringSSL_SSL_CTX_use_certificate(context, cert.ref)
+        let rc = cert.withUnsafeMutableX509Pointer { ref in
+            CNIOBoringSSL_SSL_CTX_use_certificate(context, ref)
+        }
         guard rc == 1 else {
             throw NIOSSLError.failedToLoadCertificate
         }
     }
     
     private static func addAdditionalChainCertificate(_ cert: NIOSSLCertificate, context: OpaquePointer) throws {
-        guard 1 == CNIOBoringSSL_SSL_CTX_add1_chain_cert(context, cert.ref) else {
+        let rc = cert.withUnsafeMutableX509Pointer { ref in
+            CNIOBoringSSL_SSL_CTX_add1_chain_cert(context, ref)
+        }
+        guard rc == 1 else {
             throw NIOSSLError.failedToLoadCertificate
         }
     }
     
     private static func setPrivateKey(_ key: NIOSSLPrivateKey, context: OpaquePointer) throws {
-        guard 1 == CNIOBoringSSL_SSL_CTX_use_PrivateKey(context, key.ref) else {
-            throw NIOSSLError.failedToLoadPrivateKey
+        switch key.representation {
+        case .native:
+            let rc = key.withUnsafeMutableEVPPKEYPointer { ref in
+                CNIOBoringSSL_SSL_CTX_use_PrivateKey(context, ref)
+            }
+            guard 1 == rc else {
+                throw NIOSSLError.failedToLoadPrivateKey
+            }
+        case .custom:
+            CNIOBoringSSL_SSL_CTX_set_private_key_method(context, customPrivateKeyMethod)
         }
     }
 
@@ -460,8 +482,8 @@ extension NIOSSLContext {
     
     private static func addCACertificateNameToList(context: OpaquePointer, certificate: NIOSSLCertificate) throws {
         // Adds the CA name extracted from cert to the list of CAs sent to the client when requesting a client certificate.
-        try withExtendedLifetime(certificate) {
-            guard 1 == CNIOBoringSSL_SSL_CTX_add_client_CA(context, certificate.ref) else {
+        try certificate.withUnsafeMutableX509Pointer { ref in
+            guard 1 == CNIOBoringSSL_SSL_CTX_add_client_CA(context, ref) else {
                 throw NIOSSLError.failedToLoadCertificate
             }
         }
@@ -492,16 +514,14 @@ extension NIOSSLContext {
             // This could be from a location like /etc/ssl/cert.pem as an example.
             CNIOBoringSSL_SSL_CTX_set_client_CA_list(context, CNIOBoringSSL_SSL_load_client_CA_file(path))
         } else if sendCANames, isDirectory {
-            // If the path that is passed in is a directory, scan the directory and gather up the PEM or DER files.
-            let pemFilePaths = DirectoryContents(path: path).filter { $0.suffix(4) == ".pem" || $0.suffix(4) == ".cer" }
-            // Create the PEM files one by one and use `addCACertificateNameToList` to add the CA name to the STACK_OF(X509_NAME).
-            for path in pemFilePaths {
-                let cert: NIOSSLCertificate
-                if path.suffix(4) == ".pem" {
-                    cert = try NIOSSLCertificate(file: path, format: .pem)
-                } else {
-                    cert = try NIOSSLCertificate(file: path, format: .der)
-                }
+            // Match the c_rehash directory format and load the certificate based on this criteria.
+            let certificateFilePaths = try DirectoryContents(path: path).filter {
+                try self._isRehashFormat(path: $0)
+            }
+            // Load only the certificates that resolve to an existing certificate in the directory.
+            for symPath in certificateFilePaths {
+                // c_rehash only support pem files.
+                let cert = try NIOSSLCertificate(file: symPath, format: .pem)
                 try addCACertificateNameToList(context: context, certificate: cert)
             }
         }
@@ -509,7 +529,10 @@ extension NIOSSLContext {
 
     private static func addRootCertificate(_ cert: NIOSSLCertificate, context: OpaquePointer) throws {
         let store = CNIOBoringSSL_SSL_CTX_get_cert_store(context)!
-        if 0 == CNIOBoringSSL_X509_STORE_add_cert(store, cert.ref) {
+        let rc = cert.withUnsafeMutableX509Pointer { ref in
+            CNIOBoringSSL_X509_STORE_add_cert(store, ref)
+        }
+        if 0 == rc {
             throw NIOSSLError.failedToLoadCertificate
         }
     }
@@ -549,6 +572,44 @@ extension NIOSSLContext {
             // either.
             parentSwiftContext.keyLogManager!.log(linePointer)
         }
+    }
+    
+    /// Takes a path and determines if the file at this path is of c_rehash format .
+    internal static func _isRehashFormat(path: String) throws -> Bool {
+        // Check if the element’s name matches the c_rehash symlink name format.
+        // The links created are of the form HHHHHHHH.D, where each H is a hexadecimal character and D is a single decimal digit.
+        let utf8PathView = path.utf8
+        let utf8PathSplitView = utf8PathView.split(separator: UInt8(ascii: "/"))
+        
+        // Make sure the path is at least 10 units long
+        guard let lastPathComponent = utf8PathSplitView.last,
+              lastPathComponent.count == 10 else { return false }
+        // Split into filename parts HHHHHHHH.D -> [[HHHHHHHH], [D]]
+        let filenameParts = lastPathComponent.split(separator: UInt8(ascii: "."))
+        
+        // Double check that the extension did not fail to cast to an integer.
+        // Make sure that the filename is an 8 character hex based file name.
+        guard filenameParts.count == 2,
+              let filename = filenameParts.first,
+              let fileExtension = filenameParts.last,
+              fileExtension.count == 1,
+              filename.count == 8,
+              filename.allSatisfy({ $0.isHexDigit }),
+              fileExtension.first == UInt8(ascii: "0") else { return false }
+        
+        // Check if the element is a symlink. If it is not, return false.
+        var buffer = stat()
+        let _ = try Posix.lstat(path: path, buf: &buffer)
+        // Check the mode to make sure this is a symlink
+#if os(Android) && arch(arm)
+        if (buffer.st_mode & UInt32(Glibc.S_IFMT)) != UInt32(Glibc.S_IFLNK) { return false }
+#else
+        if (buffer.st_mode & S_IFMT) != S_IFLNK { return false }
+#endif
+
+        // Return true at this point because the file format is considered to be in rehash format and a symlink.
+        // Rehash format being "%08lx.%d" or HHHHHHHH.D
+        return true
     }
 }
 
@@ -689,5 +750,26 @@ internal class DirectoryContents: Sequence, IteratorProtocol {
     
     deinit {
         closedir(dir)
+    }
+}
+
+// Used as part of the `_isRehashFormat` format to determine if the filename is a hexadecimal filename.
+extension UTF8.CodeUnit {
+    private static let asciiZero = UInt8(ascii: "0")
+    private static let asciiNine = UInt8(ascii: "9")
+    private static let asciiLowercaseA = UInt8(ascii: "a")
+    private static let asciiLowercaseF = UInt8(ascii: "f")
+    private static let asciiUppercaseA = UInt8(ascii: "A")
+    private static let asciiUppercaseF = UInt8(ascii: "F")
+
+    var isHexDigit: Bool {
+        switch self {
+        case (.asciiZero)...(.asciiNine),
+             (.asciiLowercaseA)...(.asciiLowercaseF),
+             (.asciiUppercaseA)...(.asciiUppercaseF):
+            return true
+        default:
+            return false
+        }
     }
 }

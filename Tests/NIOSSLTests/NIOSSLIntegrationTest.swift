@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -13,13 +13,11 @@
 //===----------------------------------------------------------------------===//
 
 import XCTest
-#if compiler(>=5.1)
 @_implementationOnly import CNIOBoringSSL
-#else
-import CNIOBoringSSL
-#endif
 import NIOConcurrencyHelpers
-import NIO
+import NIOCore
+import NIOEmbedded
+import NIOPosix
 @testable import NIOSSL
 import NIOTLS
 
@@ -459,7 +457,9 @@ class NIOSSLIntegrationTest: XCTestCase {
         let manager = BoringSSLPassphraseCallbackManager { closure in closure(passphrase.utf8) }
         let rc = withExtendedLifetime(manager) { manager -> CInt in
             let userData = Unmanaged.passUnretained(manager).toOpaque()
-            return CNIOBoringSSL_PEM_write_bio_PrivateKey(fileBio, key.ref, CNIOBoringSSL_EVP_aes_256_cbc(), nil, 0, globalBoringSSLPassphraseCallback, userData)
+            return key.withUnsafeMutableEVPPKEYPointer { ref in
+                return CNIOBoringSSL_PEM_write_bio_PrivateKey(fileBio, ref, CNIOBoringSSL_EVP_aes_256_cbc(), nil, 0, globalBoringSSLPassphraseCallback, userData)
+            }
         }
         CNIOBoringSSL_BIO_free(fileBio)
         precondition(rc == 1)
@@ -478,7 +478,9 @@ class NIOSSLIntegrationTest: XCTestCase {
         let fileBio = CNIOBoringSSL_BIO_new_fp(fdopen(tempFile, "w+"), BIO_CLOSE)
         precondition(fileBio != nil)
 
-        let rc = CNIOBoringSSL_PEM_write_bio_X509(fileBio, NIOSSLIntegrationTest.cert.ref)
+        let rc = NIOSSLIntegrationTest.cert.withUnsafeMutableX509Pointer { ref in
+            CNIOBoringSSL_PEM_write_bio_X509(fileBio, ref)
+        }
         CNIOBoringSSL_BIO_free(fileBio)
         precondition(rc == 1)
         return try fn(fileName)
@@ -2042,6 +2044,83 @@ class NIOSSLIntegrationTest: XCTestCase {
 
         // Do the same for the server, but we don't care about the outcome.
         serverChannel.pipeline.fireChannelInactive()
+    }
+
+    func testChannelInactiveDuringHandshakeSucceeded() throws {
+        // This test aims to reproduce a very unusual crash. I've never been able to come up with a clear justification of
+        // how we managed to hit it, but it goes a bit like this:
+        //
+        // 1. During a TLS handshake, a server performs a `channelRead` that triggers a handshakeCompleted message.
+        // 2. Synchronously, during that pipeline traversal, we end up with a read buffer that also contains a CLOSE_NOTIFY alert.
+        //     This may have arrived in the same packet with the handshake completion message, or as a result of something we did.
+        // 3. Additionally, we manage to synchronously enter the .closed or .unwrapped state. This is hard to imagine, but it can
+        //     happen in a few ways: channelInactive forces this transition, and managing to do a shutdown reentrantly due to extra
+        //     I/O can trigger it as well.
+        // 4. We then progress through the handshake and crash.
+        //
+        // To make this manifest in the test we use a pair of promises and finagle the I/O such that everything goes wrong at once.
+        // This can indicate how unusual the circumstance is in which this happens. Nonetheless, we've seen it happen on production
+        // systems.
+        let serverChannel = EmbeddedChannel()
+        let clientChannel = EmbeddedChannel()
+        defer {
+            // Both were closed uncleanly in the test, but the server error was already
+            // consumed.
+            XCTAssertNoThrow(try serverChannel.finish())
+            XCTAssertThrowsError(try clientChannel.finish())
+        }
+
+        let context = try configuredSSLContext()
+        let clientChannelCompletedPromise = clientChannel.eventLoop.makePromise(of: Void.self)
+        let clientChannelCompletedHandler = WaitForHandshakeHandler(handshakeResultPromise: clientChannelCompletedPromise)
+        let serverChannelCompletedPromise = serverChannel.eventLoop.makePromise(of: Void.self)
+        let serverChannelCompletedHandler = WaitForHandshakeHandler(handshakeResultPromise: serverChannelCompletedPromise)
+
+        clientChannelCompletedPromise.futureResult.whenSuccess {
+            // Here we need to immediately (and _recursively_) ask the client channel to shutdown. This should force a CLOSE_NOTIFY
+            // message out in the same tick as the handshake message.
+            clientChannel.close(promise: nil)
+
+            // Now deliver all the client messages to the server channel _in one go_.
+            var flattenedBytes = clientChannel.allocator.buffer(capacity: 1024)
+            while let clientDatum = try! clientChannel.readOutbound(as: ByteBuffer.self) {
+                flattenedBytes.writeImmutableBuffer(clientDatum)
+            }
+
+            // Can't use XCTAssertThrowsError here, this function call isn't allowed to throw.
+            do {
+                try serverChannel.writeInbound(flattenedBytes)
+                XCTFail("Expected to throw")
+            } catch {
+                guard case .some(.uncleanShutdown) = error as? NIOSSLError else {
+                    XCTFail("Unexpected error \(error)")
+                    return
+                }
+            }
+        }
+
+        serverChannelCompletedPromise.futureResult.whenSuccess {
+            // Here we do something very, very dangerous: we call fireChannelInactive on our own channel.
+            // This simulates us hitting a close condition in some other form.
+            serverChannel.pipeline.fireChannelInactive()
+        }
+
+        XCTAssertNoThrow(
+            try serverChannel.pipeline.syncOperations.addHandlers([NIOSSLServerHandler(context: context), serverChannelCompletedHandler])
+        )
+        XCTAssertNoThrow(
+            try clientChannel.pipeline.syncOperations.addHandlers([try NIOSSLClientHandler(context: context, serverHostname: nil), clientChannelCompletedHandler])
+        )
+
+        // Do the handshake.
+        let addr: SocketAddress = try SocketAddress(unixDomainSocketPath: "/tmp/whatever")
+        let connectFuture = clientChannel.connect(to: addr)
+        serverChannel.pipeline.fireChannelActive()
+        try interactInMemory(clientChannel: clientChannel, serverChannel: serverChannel)
+        try connectFuture.wait()
+
+        // We now need to forcibly shutdown the client channel, as otherwise it'll hang waiting for a server that never comes back.
+        clientChannel.pipeline.fireChannelInactive()
     }
 
     func testTrustedFirst() throws {

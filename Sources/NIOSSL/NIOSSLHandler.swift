@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -12,12 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-import NIO
-#if compiler(>=5.1)
+import NIOCore
 @_implementationOnly import CNIOBoringSSL
-#else
-import CNIOBoringSSL
-#endif
 import NIOTLS
 
 /// The base class for all NIOSSL handlers. This class cannot actually be instantiated by
@@ -60,6 +56,10 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
     // MARK: - Proxyman End
 
+    internal var channel: Channel? {
+        return self.storedContext?.channel
+    }
+    
     internal init(connection: SSLConnection, shutdownTimeout: TimeAmount) {
         self.connection = connection
         self.bufferedWrites = MarkedCircularBuffer(initialCapacity: 96)  // 96 brings the total size of the buffer to just shy of one page
@@ -117,7 +117,9 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
             // In this case the channel is going through the doHandshake steps and
             // a channelInactive is fired taking down the connection.
             // This case propogates a .handshakeFailed instead of an .uncleanShutdown.
-            channelError = NIOSSLError.handshakeFailed(.sslError(BoringSSLError.buildErrorStack()))
+            // We use a synthetic error here as the error stack will be empty, and we should try to
+            // provide some diagnostic help.
+            channelError = NIOSSLError.handshakeFailed(.sslError([.eofDuringHandshake]))
         default:
             // This is a ragged EOF: we weren't sent a CLOSE_NOTIFY. We want to send a user
             // event to notify about this before we propagate channelInactive. We also want to fail all
@@ -266,7 +268,11 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
         case .failed(let err):
             writeDataToNetwork(context: context, promise: nil)
             
-            // TODO(cory): This event should probably fire out of the BoringSSL info callback.
+            // If there's a failed private key operation, we fire both errors.
+            if case .failure(let privateKeyError) = self.connection.customPrivateKeyResult {
+                context.fireErrorCaught(privateKeyError)
+            }
+
             context.fireErrorCaught(NIOSSLError.handshakeFailed(err))
             channelClose(context: context, reason: NIOSSLError.handshakeFailed(err))
         }
@@ -386,8 +392,13 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
             case .failed(BoringSSLError.zeroReturn):
                 switch self.state {
-                case .idle, .closed, .unwrapped, .handshaking:
+                case .idle, .handshaking:
                     preconditionFailure("Should not get zeroReturn in \(self.state)")
+                case .closed, .unwrapped:
+                    // This is an unexpected place to be, but it's not totally impossible. Assume this
+                    // is the result of a wonky I/O pattern and just ignore it.
+                    self.plaintextReadBuffer = receiveBuffer
+                    break readLoop
                 case .active:
                     self.state = .closing(self.scheduleTimedOutShutdown(context: context))
                 case .unwrapping, .closing:
@@ -725,7 +736,7 @@ fileprivate extension Array where Element == EventLoopPromise<Void> {
 
 // MARK:- Code for handling asynchronous handshake resumption.
 extension NIOSSLHandler {
-    internal func asynchronousCertificateVerificationComplete() {
+    internal func resumeHandshake() {
         guard let storedContext = self.storedContext else {
             // Oh well, the connection is dead. Do nothing.
             return

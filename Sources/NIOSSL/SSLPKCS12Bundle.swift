@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -12,12 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.1)
 @_implementationOnly import CNIOBoringSSL
-#else
-import CNIOBoringSSL
-#endif
-import NIO
 
 
 /// A container of a single PKCS#12 bundle.
@@ -49,7 +44,7 @@ public struct NIOSSLPKCS12Bundle {
 
     public init<Bytes: Collection>(ref: OpaquePointer, passphrase: Bytes?) throws where Bytes.Element == UInt8 {
         var pkey: UnsafeMutablePointer<EVP_PKEY>? = nil
-        var cert: UnsafeMutablePointer<X509>? = nil
+        var cert: OpaquePointer?/*<X509>*/ = nil
         var caCerts: OpaquePointer? = nil
 
         let rc = try passphrase.withSecureCString { passphrase in

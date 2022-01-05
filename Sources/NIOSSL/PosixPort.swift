@@ -2,7 +2,7 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2021 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
@@ -20,7 +20,15 @@
 //
 // The code is an exact port from SwiftNIO, so if that version ever becomes public we
 // can lift anything missing from there and move it over without change.
-import NIO
+#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+import Darwin.C
+#elseif os(Linux) || os(FreeBSD) || os(Android)
+import Glibc
+#else
+#error("unsupported os")
+#endif
+
+import NIOCore
 
 #if os(Android)
 internal typealias FILEPointer = OpaquePointer
@@ -33,11 +41,16 @@ private let sysMlock: @convention(c) (UnsafeRawPointer?, size_t) -> CInt = mlock
 private let sysMunlock: @convention(c) (UnsafeRawPointer?, size_t) -> CInt = munlock
 private let sysFclose: @convention(c) (FILEPointer?) -> CInt = fclose
 
-// Sadly, stat has different signatures with glibc and macOS libc.
+// Sadly, stat, lstat, and readlink have different signatures with glibc and macOS libc.
 #if os(macOS) || os(iOS) || os(watchOS) || os(tvOS) || os(Android)
 private let sysStat: @convention(c) (UnsafePointer<CChar>?, UnsafeMutablePointer<stat>?) -> CInt = stat(_:_:)
+private let sysReadlink: @convention(c) (UnsafePointer<Int8>?, UnsafeMutablePointer<Int8>?, Int) -> Int = readlink
+private let sysLstat:  @convention(c) (UnsafePointer<Int8>?, UnsafeMutablePointer<stat>?) -> Int32 = lstat
+
 #elseif os(Linux) || os(FreeBSD)
 private let sysStat: @convention(c) (UnsafePointer<CChar>, UnsafeMutablePointer<stat>) -> CInt = stat(_:_:)
+private let sysReadlink: @convention(c) (UnsafePointer<Int8>, UnsafeMutablePointer<Int8>, Int) -> Int = readlink
+private let sysLstat:  @convention(c) (UnsafePointer<Int8>, UnsafeMutablePointer<stat>) -> Int32 = lstat
 #endif
 
 
@@ -99,12 +112,27 @@ internal enum Posix {
             sysFclose(file)
         }
     }
+    
+    @inline(never)
+    internal static func readlink(path: UnsafePointer<Int8>, buf: UnsafeMutablePointer<Int8>, bufSize: Int) throws -> Int {
+        return try wrapSyscall {
+            sysReadlink(path, buf, bufSize)
+        }
+    }
 
     @inline(never)
     @discardableResult
     internal static func stat(path: UnsafePointer<CChar>, buf: UnsafeMutablePointer<stat>) throws -> CInt {
         return try wrapSyscall {
             sysStat(path, buf)
+        }
+    }
+    
+    @inline(never)
+    @discardableResult
+    internal static func lstat(path: UnsafePointer<Int8>, buf: UnsafeMutablePointer<stat>) throws -> Int32 {
+        return try wrapSyscall {
+            sysLstat(path, buf)
         }
     }
 
