@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, Google Inc.
+/* Copyright (c) 2022, Google Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -12,27 +12,25 @@
  * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
 
-#include <CNIOBoringSSL_cpu.h>
+#ifndef OPENSSL_HEADER_CRYPTO_FIPSMODULE_DH_INTERNAL_H
+#define OPENSSL_HEADER_CRYPTO_FIPSMODULE_DH_INTERNAL_H
 
-#if defined(OPENSSL_PPC64LE)
+#include <CNIOBoringSSL_base.h>
 
-#include <sys/auxv.h>
-
-#include "internal.h"
-
-
-#if !defined(PPC_FEATURE2_HAS_VCRYPTO)
-// PPC_FEATURE2_HAS_VCRYPTO was taken from section 4.1.2.3 of the “OpenPOWER
-// ABI for Linux Supplement”.
-#define PPC_FEATURE2_HAS_VCRYPTO 0x02000000
+#if defined(__cplusplus)
+extern "C" {
 #endif
 
-void OPENSSL_cpuid_setup(void) {
-  OPENSSL_ppc64le_hwcap2 = getauxval(AT_HWCAP2);
-}
 
-int CRYPTO_is_PPC64LE_vcrypto_capable(void) {
-  return (OPENSSL_ppc64le_hwcap2 & PPC_FEATURE2_HAS_VCRYPTO) != 0;
-}
+// dh_compute_key_padded_no_self_test does the same as |DH_compute_key_padded|,
+// but doesn't try to run the self-test first. This is for use in the self tests
+// themselves, to prevent an infinite loop.
+int dh_compute_key_padded_no_self_test(unsigned char *out,
+                                       const BIGNUM *peers_key, DH *dh);
 
-#endif  // OPENSSL_PPC64LE
+
+#if defined(__cplusplus)
+}
+#endif
+
+#endif  // OPENSSL_HEADER_CRYPTO_FIPSMODULE_DH_INTERNAL_H

@@ -1,4 +1,4 @@
-// swift-tools-version:5.2
+// swift-tools-version:5.4
 //===----------------------------------------------------------------------===//
 //
 // This source file is part of the SwiftNIO open source project
@@ -26,7 +26,7 @@ import class Foundation.ProcessInfo
 // Sources/CNIOBoringSSL directory. The source repository is at
 // https://boringssl.googlesource.com/boringssl.
 //
-// BoringSSL Commit: 2042972e8458833714bce23386931b1c79978439
+// BoringSSL Commit: f299342e38fd34b589604ef5b730623da13ee235
 
 /// This function generates the dependencies we want to express.
 ///
@@ -73,15 +73,18 @@ MANGLE_END */
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOTLS", package: "swift-nio"),
             ]),
-        .target(
+        .executableTarget(
             name: "NIOTLSServer",
             dependencies: [
                 "NIOSSL",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            ],
+            exclude: [
+                "README.md"
             ]),
-        .target(
+        .executableTarget(
             name: "NIOSSLHTTP1Client",
             dependencies: [
                 "NIOSSL",
@@ -89,8 +92,11 @@ MANGLE_END */
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
+            ],
+            exclude: [
+                "README.md"
             ]),
-        .target(
+        .executableTarget(
             name: "NIOSSLPerformanceTester",
             dependencies: [
                 "NIOSSL",

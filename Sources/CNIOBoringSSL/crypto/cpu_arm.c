@@ -1,5 +1,4 @@
-/* Copyright (c) 2018, Google Inc.
- * Copyright (c) 2020, Arm Ltd.
+/* Copyright (c) 2014, Google Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -13,29 +12,27 @@
  * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
 
-#include <CNIOBoringSSL_cpu.h>
+#include "internal.h"
 
-#if defined(OPENSSL_AARCH64) && defined(OPENSSL_WINDOWS) && \
+#if (defined(OPENSSL_ARM) || defined(OPENSSL_AARCH64)) && \
     !defined(OPENSSL_STATIC_ARMCAP)
-
-#include <windows.h>
 
 #include <CNIOBoringSSL_arm_arch.h>
 
-#include "internal.h"
 
 extern uint32_t OPENSSL_armcap_P;
-void OPENSSL_cpuid_setup(void) {
-  // We do not need to check for the presence of NEON, as Armv8-A always has it
-  OPENSSL_armcap_P |= ARMV7_NEON;
 
-  if (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE)) {
-    // These are all covered by one call in Windows
-    OPENSSL_armcap_P |= ARMV8_AES;
-    OPENSSL_armcap_P |= ARMV8_PMULL;
-    OPENSSL_armcap_P |= ARMV8_SHA1;
-    OPENSSL_armcap_P |= ARMV8_SHA256;
-  }
+int CRYPTO_is_NEON_capable_at_runtime(void) {
+  return (OPENSSL_armcap_P & ARMV7_NEON) != 0;
 }
 
-#endif
+int CRYPTO_is_ARMv8_AES_capable_at_runtime(void) {
+  return (OPENSSL_armcap_P & ARMV8_AES) != 0;
+}
+
+int CRYPTO_is_ARMv8_PMULL_capable_at_runtime(void) {
+  return (OPENSSL_armcap_P & ARMV8_PMULL) != 0;
+}
+
+#endif  /* (defined(OPENSSL_ARM) || defined(OPENSSL_AARCH64)) &&
+           !defined(OPENSSL_STATIC_ARMCAP) */
