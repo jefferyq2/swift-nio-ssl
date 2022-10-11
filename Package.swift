@@ -1,4 +1,4 @@
-// swift-tools-version:5.4
+// swift-tools-version:5.6
 //===----------------------------------------------------------------------===//
 //
 // This source file is part of the SwiftNIO open source project
@@ -26,7 +26,7 @@ import class Foundation.ProcessInfo
 // Sources/CNIOBoringSSL directory. The source repository is at
 // https://boringssl.googlesource.com/boringssl.
 //
-// BoringSSL Commit: f299342e38fd34b589604ef5b730623da13ee235
+// BoringSSL Commit: cab31f65f1ad6e6daca62e95b25dd6cd805fce0b
 
 /// This function generates the dependencies we want to express.
 ///
@@ -36,7 +36,8 @@ import class Foundation.ProcessInfo
 func generateDependencies() -> [Package.Dependency] {
     if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
         return [
-            .package(url: "https://github.com/apple/swift-nio.git", from: "2.32.0"),
+            .package(url: "https://github.com/apple/swift-nio.git", from: "2.42.0"),
+            .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.0.0"),
         ]
     } else {
         return [

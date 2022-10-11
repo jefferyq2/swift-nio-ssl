@@ -37,6 +37,9 @@ extension NIOSSLIntegrationTest {
                 ("testAddingTlsToActiveChannelStillHandshakes", testAddingTlsToActiveChannelStillHandshakes),
                 ("testValidatesHostnameOnConnectionFails", testValidatesHostnameOnConnectionFails),
                 ("testValidatesHostnameOnConnectionSucceeds", testValidatesHostnameOnConnectionSucceeds),
+                ("testAdditionalValidationOnConnectionSucceeds", testAdditionalValidationOnConnectionSucceeds),
+                ("testAdditionalValidationOnConnectionFails", testAdditionalValidationOnConnectionFails),
+                ("testFlushWhileAdditionalValidationIsInProgressDoesNotActuallyFlush", testFlushWhileAdditionalValidationIsInProgressDoesNotActuallyFlush),
                 ("testDontLoseClosePromises", testDontLoseClosePromises),
                 ("testTrustStoreOnDisk", testTrustStoreOnDisk),
                 ("testChecksTrustStoreOnDisk", testChecksTrustStoreOnDisk),
@@ -50,6 +53,7 @@ extension NIOSSLIntegrationTest {
                 ("testExtractingCertificates", testExtractingCertificates),
                 ("testForcingVerificationFailureNewCallback", testForcingVerificationFailureNewCallback),
                 ("testErroringNewVerificationCallback", testErroringNewVerificationCallback),
+                ("testReadsAreUnbufferedAfterHandshake", testReadsAreUnbufferedAfterHandshake),
                 ("testNewCallbackCanDelayHandshake", testNewCallbackCanDelayHandshake),
                 ("testExtractingCertificatesNewCallback", testExtractingCertificatesNewCallback),
                 ("testNewCallbackCombinedWithDefaultTrustStore", testNewCallbackCombinedWithDefaultTrustStore),
@@ -65,6 +69,7 @@ extension NIOSSLIntegrationTest {
                 ("testWriteFromFailureOfWrite", testWriteFromFailureOfWrite),
                 ("testChannelInactiveDuringHandshakeSucceeded", testChannelInactiveDuringHandshakeSucceeded),
                 ("testTrustedFirst", testTrustedFirst),
+                ("testWriteSplitting", testWriteSplitting),
            ]
    }
 }

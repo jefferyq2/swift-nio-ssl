@@ -35,19 +35,86 @@ public struct NIOSSLClientTLSProvider<Bootstrap: NIOClientTCPBootstrapProtocol>:
 
     let context: NIOSSLContext
     let serverHostname: String?
+    #if swift(>=5.7)
+    /// See ``NIOSSLCustomVerificationCallback`` for more documentation
+    let customVerificationCallback: (@Sendable ([NIOSSLCertificate], EventLoopPromise<NIOSSLVerificationResult>) -> Void)?
+    /// See ``_NIOAdditionalPeerCertificateVerificationCallback`` for more documentation
+    let additionalPeerCertificateVerificationCallback: (@Sendable (NIOSSLCertificate, Channel) -> EventLoopFuture<Void>)?
+    #else
     let customVerificationCallback: NIOSSLCustomVerificationCallback?
+    let additionalPeerCertificateVerificationCallback: _NIOAdditionalPeerCertificateVerificationCallback?
+    #endif
 
-    /// Construct the TLS provider with the necessary configuration.
-    public init(context: NIOSSLContext,
-                serverHostname: String?,
-                customVerificationCallback: NIOSSLCustomVerificationCallback? = nil) throws {
+    #if swift(>=5.7)
+    internal init(
+        context: NIOSSLContext,
+        serverHostname: String?,
+        customVerificationCallback: (@Sendable ([NIOSSLCertificate], EventLoopPromise<NIOSSLVerificationResult>) -> Void)? = nil,
+        additionalPeerCertificateVerificationCallback: (@Sendable (NIOSSLCertificate, Channel) -> EventLoopFuture<Void>)? = nil
+    ) throws {
         try serverHostname.map {
             try $0.validateSNIServerName()
         }
         self.context = context
         self.serverHostname = serverHostname
         self.customVerificationCallback = customVerificationCallback
+        self.additionalPeerCertificateVerificationCallback = additionalPeerCertificateVerificationCallback
     }
+    #else
+    internal init(
+        context: NIOSSLContext,
+        serverHostname: String?,
+        customVerificationCallback: NIOSSLCustomVerificationCallback? = nil,
+        additionalPeerCertificateVerificationCallback: _NIOAdditionalPeerCertificateVerificationCallback? = nil
+    ) throws {
+        try serverHostname.map {
+            try $0.validateSNIServerName()
+        }
+        self.context = context
+        self.serverHostname = serverHostname
+        self.customVerificationCallback = customVerificationCallback
+        self.additionalPeerCertificateVerificationCallback = additionalPeerCertificateVerificationCallback
+    }
+    #endif
+    
+    #if swift(>=5.7)
+    /// Construct the TLS provider with the necessary configuration.
+    ///
+    /// - parameters:
+    ///     - context: The ``NIOSSLContext`` to use with the connection.
+    ///     - serverHostname: The hostname of the server we're trying to connect to, if known. This will be used in the SNI extension,
+    ///         and used to validate the server certificate.
+    ///     - customVerificationCallback: A callback to use that will override NIOSSL's normal verification logic. See ``NIOSSLCustomVerificationCallback`` for complete documentation.
+    ///
+    ///         If set, this callback is provided the certificates presented by the peer. NIOSSL will not have pre-processed them. The callback will not be used if the
+    ///         ``TLSConfiguration`` that was used to construct the ``NIOSSLContext`` has ``TLSConfiguration/certificateVerification`` set to ``CertificateVerification/none``.
+    @preconcurrency
+    public init(
+        context: NIOSSLContext,
+        serverHostname: String?,
+        customVerificationCallback: (@Sendable ([NIOSSLCertificate], EventLoopPromise<NIOSSLVerificationResult>) -> Void)? = nil
+    ) throws {
+        try self.init(context: context, serverHostname: serverHostname, customVerificationCallback: customVerificationCallback, additionalPeerCertificateVerificationCallback: nil)
+    }
+    #else
+    /// Construct the TLS provider with the necessary configuration.
+    ///
+    /// - parameters:
+    ///     - context: The ``NIOSSLContext`` to use with the connection.
+    ///     - serverHostname: The hostname of the server we're trying to connect to, if known. This will be used in the SNI extension,
+    ///         and used to validate the server certificate.
+    ///     - customVerificationCallback: A callback to use that will override NIOSSL's normal verification logic.
+    ///
+    ///         If set, this callback is provided the certificates presented by the peer. NIOSSL will not have pre-processed them. The callback will not be used if the
+    ///         ``TLSConfiguration`` that was used to construct the ``NIOSSLContext`` has ``TLSConfiguration/certificateVerification`` set to ``CertificateVerification/none``.
+    public init(
+        context: NIOSSLContext,
+        serverHostname: String?,
+        customVerificationCallback: NIOSSLCustomVerificationCallback? = nil
+    ) throws {
+        try self.init(context: context, serverHostname: serverHostname, customVerificationCallback: customVerificationCallback, additionalPeerCertificateVerificationCallback: nil)
+    }
+    #endif
 
     /// Enable TLS on the bootstrap. This is not a function you will typically call as a user, it is called by
     /// `NIOClientTCPBootstrap`.
@@ -55,14 +122,14 @@ public struct NIOSSLClientTLSProvider<Bootstrap: NIOClientTCPBootstrapProtocol>:
         // NIOSSLClientHandler.init only throws because of `malloc` error and invalid SNI hostnames. We want to crash
         // on malloc error and we pre-checked the SNI hostname in `init` so that should be impossible here.
         return bootstrap.protocolHandlers {
-            if let customVerificationCallback = self.customVerificationCallback {
-                return [try! NIOSSLClientHandler(context: self.context,
-                                                 serverHostname: self.serverHostname,
-                                                 customVerificationCallback: customVerificationCallback)]
-            } else {
-                return [try! NIOSSLClientHandler(context: self.context,
-                                                 serverHostname: self.serverHostname)]
-            }
+            [
+                try! NIOSSLClientHandler(
+                    context: self.context,
+                    serverHostname: self.serverHostname,
+                    optionalCustomVerificationCallback: customVerificationCallback,
+                    optionalAdditionalPeerCertificateVerificationCallback: additionalPeerCertificateVerificationCallback
+                )
+            ]
         }
     }
 }

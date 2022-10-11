@@ -14,13 +14,13 @@
 
 @_implementationOnly import CNIOBoringSSL
 
-/// An `NIOSSLPublicKey` is an abstract handle to a public key owned by BoringSSL.
+/// A ``NIOSSLPublicKey`` is an abstract handle to a public key owned by BoringSSL.
 ///
 /// This object is of minimal utility, as it cannot be used for very many operations
-/// in `NIOSSL`. Its primary purpose is to allow extracting public keys from
-/// `NIOSSLCertificate` objects to be serialized, so that they can be passed to
+/// in ``NIOSSL``. Its primary purpose is to allow extracting public keys from
+/// ``NIOSSLCertificate`` objects to be serialized, so that they can be passed to
 /// general-purpose cryptography libraries.
-public class NIOSSLPublicKey {
+public final class NIOSSLPublicKey {
     private let _ref: UnsafeMutableRawPointer /*<EVP_PKEY>*/
 
     private var ref: UnsafeMutablePointer<EVP_PKEY> {
@@ -36,9 +36,15 @@ public class NIOSSLPublicKey {
     }
 }
 
+#if swift(>=5.6)
+// NIOSSLPublicKey is publicly immutable and we do not internally mutate it after initialisation.
+// It is therefore Sendable.
+extension NIOSSLPublicKey: @unchecked Sendable {}
+#endif
+
 // MARK:- Helpful initializers
 extension NIOSSLPublicKey {
-    /// Create an `NIOSSLPublicKey` object from an internal `EVP_PKEY` pointer.
+    /// Create a ``NIOSSLPublicKey`` object from an internal `EVP_PKEY` pointer.
     ///
     /// This method expects `pointer` to be passed at +1, and consumes that reference.
     ///

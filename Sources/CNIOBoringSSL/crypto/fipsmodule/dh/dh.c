@@ -64,9 +64,10 @@
 #include <CNIOBoringSSL_mem.h>
 #include <CNIOBoringSSL_thread.h>
 
-#include "internal.h"
 #include "../../internal.h"
 #include "../bn/internal.h"
+#include "../service_indicator/internal.h"
+#include "internal.h"
 
 
 #define OPENSSL_DH_MAX_MODULUS_BITS 10000
@@ -109,6 +110,8 @@ void DH_free(DH *dh) {
 
   OPENSSL_free(dh);
 }
+
+unsigned DH_bits(const DH *dh) { return BN_num_bits(dh->p); }
 
 const BIGNUM *DH_get0_pub_key(const DH *dh) { return dh->pub_key; }
 
@@ -365,7 +368,8 @@ int DH_compute_key(unsigned char *out, const BIGNUM *peers_key, DH *dh) {
   int ret = -1;
   BIGNUM *shared_key = BN_CTX_get(ctx);
   if (shared_key && dh_compute_key(dh, shared_key, peers_key, ctx)) {
-    ret = BN_bn2bin(shared_key, out);
+    // A |BIGNUM|'s byte count fits in |int|.
+    ret = (int)BN_bn2bin(shared_key, out);
   }
 
   BN_CTX_end(ctx);
@@ -382,6 +386,8 @@ int DH_compute_key_hashed(DH *dh, uint8_t *out, size_t *out_len,
   if (digest_len > max_out_len) {
     return 0;
   }
+
+  FIPS_service_indicator_lock_state();
 
   int ret = 0;
   const size_t dh_len = DH_size(dh);
@@ -404,6 +410,7 @@ int DH_compute_key_hashed(DH *dh, uint8_t *out, size_t *out_len,
   ret = 1;
 
  err:
+  FIPS_service_indicator_unlock_state();
   OPENSSL_free(shared_bytes);
   return ret;
 }

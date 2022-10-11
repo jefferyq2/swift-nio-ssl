@@ -142,8 +142,14 @@ kVuVyNH7NBMh6YOuTL1dh55bvDjvgkuzudepsZnpfjgQKE1aZ7dL32Xi000gBM8=
 -----END CERTIFICATE-----
 """
 
-func makeTemporaryFile(fileExtension: String = "") -> String {
-    let template = "\(FileManager.default.temporaryDirectory.path)/niotestXXXXXXX\(fileExtension)"
+func makeTemporaryFile(fileExtension: String = "", customPath: String = "") throws -> String {
+    var template = "\(FileManager.default.temporaryDirectory.path)/niotestXXXXXXX\(fileExtension)"
+    // If a custom file path is passed in then a new directory has to also be created.  Then the file can be written to that directory.
+    if !customPath.isEmpty {
+        let path = "\(FileManager.default.temporaryDirectory.path)/\(customPath)/"
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: path), withIntermediateDirectories: true)
+        template = "\(FileManager.default.temporaryDirectory.path)/\(customPath)/niotestXXXXXXX\(fileExtension)"
+    }
     var templateBytes = template.utf8 + [0]
     let fd = templateBytes.withUnsafeMutableBufferPointer { ptr in
         ptr.baseAddress!.withMemoryRebound(to: Int8.self, capacity: ptr.count) { (ptr: UnsafeMutablePointer<Int8>) in
@@ -155,8 +161,8 @@ func makeTemporaryFile(fileExtension: String = "") -> String {
     return String(decoding: templateBytes, as: UTF8.self)
 }
 
-internal func dumpToFile(data: Data, fileExtension: String = "") throws  -> String {
-    let filename = makeTemporaryFile(fileExtension: fileExtension)
+internal func dumpToFile(data: Data, fileExtension: String = "", customPath: String = "") throws  -> String {
+    let filename = try makeTemporaryFile(fileExtension: fileExtension, customPath: customPath)
     try data.write(to: URL(fileURLWithPath: filename))
     return filename
 }
@@ -333,8 +339,16 @@ class SSLCertificateTest: XCTestCase {
     }
 
     func testLoadingNonexistentFileAsPem() throws {
-        XCTAssertThrowsError(try NIOSSLCertificate(file: "/nonexistent/path", format: .pem)) {error in
-            XCTAssertEqual(ENOENT, (error as? IOError).map { $0.errnoCode })
+        XCTAssertThrowsError(try NIOSSLCertificate(file: "/nonexistent/path", format: .pem)) { error in
+            guard let error = error as? IOError else {
+                return XCTFail("unexpected error \(error)")
+            }
+            XCTAssertEqual(ENOENT, error.errnoCode)
+            XCTAssertEqual(
+                error.description.contains("/nonexistent/path"),
+                true,
+                "error description should contain file path. Description: \(error.description)"
+            )
         }
     }
 
@@ -346,7 +360,15 @@ class SSLCertificateTest: XCTestCase {
 
     func testLoadingNonexistentFileAsDer() throws {
         XCTAssertThrowsError(try NIOSSLCertificate(file: "/nonexistent/path", format: .der)) {error in
-            XCTAssertEqual(ENOENT, (error as? IOError).map { $0.errnoCode })
+            guard let error = error as? IOError else {
+                return XCTFail("unexpected error \(error)")
+            }
+            XCTAssertEqual(ENOENT, error.errnoCode)
+            XCTAssertEqual(
+                error.description.contains("/nonexistent/path"),
+                true,
+                "error description should contain file path. Description: \(error.description)"
+            )
         }
     }
 
@@ -357,9 +379,7 @@ class SSLCertificateTest: XCTestCase {
         precondition(inet_pton(AF_INET6, "2001:db8::1", &v6addr) == 1)
 
         let cert = try NIOSSLCertificate(bytes: .init(certWithAllSupportedSANTypes.utf8), format: .pem)
-        guard let sans = cert._subjectAlternativeNames() else {
-            return XCTFail("could not get subject alternative names")
-        }
+        let sans = cert._subjectAlternativeNames()
         XCTAssertEqual(sans.count, 7)
         XCTAssertEqual(sans[0].nameType, .dnsName)
         XCTAssertEqual(String(decoding: sans[0].contents, as: UTF8.self), "localhost")
@@ -383,7 +403,7 @@ class SSLCertificateTest: XCTestCase {
 
     func testNonexistentSan() throws {
         let cert = try NIOSSLCertificate(bytes: .init(samplePemCert.utf8), format: .pem)
-        XCTAssertNil(cert._subjectAlternativeNames())
+        XCTAssertTrue(cert._subjectAlternativeNames().isEmpty)
     }
 
     func testCommonName() throws {

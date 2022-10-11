@@ -660,10 +660,15 @@ bool ssl_cipher_requires_server_key_exchange(const SSL_CIPHER *cipher);
 size_t ssl_cipher_get_record_split_len(const SSL_CIPHER *cipher);
 
 // ssl_choose_tls13_cipher returns an |SSL_CIPHER| corresponding with the best
-// available from |cipher_suites| compatible with |version| and |group_id|. It
-// returns NULL if there isn't a compatible cipher.
+// available from |cipher_suites| compatible with |version|, |group_id|, and
+// |only_fips|. It returns NULL if there isn't a compatible cipher.
 const SSL_CIPHER *ssl_choose_tls13_cipher(CBS cipher_suites, uint16_t version,
-                                          uint16_t group_id);
+                                          uint16_t group_id, bool only_fips);
+
+// ssl_tls13_cipher_meets_policy returns true if |cipher_id| is acceptable given
+// |only_fips|. (For now there's only a single policy and so the policy argument
+// is just a bool.)
+bool ssl_tls13_cipher_meets_policy(uint16_t cipher_id, bool only_fips);
 
 
 // Transcript layer.
@@ -1176,12 +1181,10 @@ struct DTLS_OUTGOING_MESSAGE {
   DTLS_OUTGOING_MESSAGE() {}
   DTLS_OUTGOING_MESSAGE(const DTLS_OUTGOING_MESSAGE &) = delete;
   DTLS_OUTGOING_MESSAGE &operator=(const DTLS_OUTGOING_MESSAGE &) = delete;
-  ~DTLS_OUTGOING_MESSAGE() { Clear(); }
 
   void Clear();
 
-  uint8_t *data = nullptr;
-  uint32_t len = 0;
+  Array<uint8_t> data;
   uint16_t epoch = 0;
   bool is_ccs = false;
 };
@@ -1692,7 +1695,8 @@ enum handback_t {
 struct SSL_HANDSHAKE_HINTS {
   static constexpr bool kAllowUniquePtr = true;
 
-  Array<uint8_t> server_random;
+  Array<uint8_t> server_random_tls12;
+  Array<uint8_t> server_random_tls13;
 
   uint16_t key_share_group_id = 0;
   Array<uint8_t> key_share_public_key;
@@ -1709,6 +1713,14 @@ struct SSL_HANDSHAKE_HINTS {
   uint16_t cert_compression_alg_id = 0;
   Array<uint8_t> cert_compression_input;
   Array<uint8_t> cert_compression_output;
+
+  uint16_t ecdhe_group_id = 0;
+  Array<uint8_t> ecdhe_public_key;
+  Array<uint8_t> ecdhe_private_key;
+
+  Array<uint8_t> decrypted_ticket;
+  bool renew_ticket = false;
+  bool ignore_ticket = false;
 };
 
 struct SSL_HANDSHAKE {
@@ -1823,8 +1835,14 @@ struct SSL_HANDSHAKE {
   // ClientHelloInner.
   uint8_t inner_client_random[SSL3_RANDOM_SIZE] = {0};
 
-  // cookie is the value of the cookie received from the server, if any.
+  // cookie is the value of the cookie in HelloRetryRequest, or empty if none
+  // was received.
   Array<uint8_t> cookie;
+
+  // dtls_cookie is the value of the cookie in DTLS HelloVerifyRequest. If
+  // empty, either none was received or HelloVerifyRequest contained an empty
+  // cookie.
+  Array<uint8_t> dtls_cookie;
 
   // ech_client_outer contains the outer ECH extension to send in the
   // ClientHello, excluding the header and type byte.
@@ -2055,6 +2073,11 @@ struct SSL_HANDSHAKE {
   // grease_seed is the entropy for GREASE values.
   uint8_t grease_seed[ssl_grease_last_index + 1] = {0};
 };
+
+// kMaxTickets is the maximum number of tickets to send immediately after the
+// handshake. We use a one-byte ticket nonce, and there is no point in sending
+// so many tickets.
+constexpr size_t kMaxTickets = 16;
 
 UniquePtr<SSL_HANDSHAKE> ssl_handshake_new(SSL *ssl);
 
@@ -2441,8 +2464,13 @@ struct SSL_PROTOCOL_METHOD {
   ssl_open_record_t (*open_app_data)(SSL *ssl, Span<uint8_t> *out,
                                      size_t *out_consumed, uint8_t *out_alert,
                                      Span<uint8_t> in);
-  int (*write_app_data)(SSL *ssl, bool *out_needs_handshake, const uint8_t *buf,
-                        int len);
+  // write_app_data encrypts and writes |in| as application data. On success, it
+  // returns one and sets |*out_bytes_written| to the number of bytes of |in|
+  // written. Otherwise, it returns <= 0 and sets |*out_needs_handshake| to
+  // whether the operation failed because the caller needs to drive the
+  // handshake.
+  int (*write_app_data)(SSL *ssl, bool *out_needs_handshake,
+                        size_t *out_bytes_written, Span<const uint8_t> in);
   int (*dispatch_alert)(SSL *ssl);
   // init_message begins a new handshake message of type |type|. |cbb| is the
   // root CBB to be passed into |finish_message|. |*body| is set to a child CBB
@@ -2631,12 +2659,23 @@ struct SSL3_STATE {
   // |read_buffer|.
   Span<uint8_t> pending_app_data;
 
-  // partial write - check the numbers match
-  unsigned int wnum = 0;  // number of bytes sent so far
-  int wpend_tot = 0;      // number bytes written
-  int wpend_type = 0;
-  int wpend_ret = 0;  // number of bytes submitted
-  const uint8_t *wpend_buf = nullptr;
+  // unreported_bytes_written is the number of bytes successfully written to the
+  // transport, but not yet reported to the caller. The next |SSL_write| will
+  // skip this many bytes from the input. This is used if
+  // |SSL_MODE_ENABLE_PARTIAL_WRITE| is disabled, in which case |SSL_write| only
+  // reports bytes written when the full caller input is written.
+  size_t unreported_bytes_written = 0;
+
+  // pending_write, if |has_pending_write| is true, is the caller-supplied data
+  // corresponding to the current pending write. This is used to check the
+  // caller retried with a compatible buffer.
+  Span<const uint8_t> pending_write;
+
+  // pending_write_type, if |has_pending_write| is true, is the record type
+  // for the current pending write.
+  //
+  // TODO(davidben): Remove this when alerts are moved out of this write path.
+  uint8_t pending_write_type = 0;
 
   // read_shutdown is the shutdown state for the read half of the connection.
   enum ssl_shutdown_t read_shutdown = ssl_shutdown_none;
@@ -2715,9 +2754,6 @@ struct SSL3_STATE {
   // key_update_pending is true if we have a KeyUpdate acknowledgment
   // outstanding.
   bool key_update_pending : 1;
-
-  // wpend_pending is true if we have a pending write outstanding.
-  bool wpend_pending : 1;
 
   // early_data_accepted is true if early data was accepted by the server.
   bool early_data_accepted : 1;
@@ -2822,8 +2858,6 @@ struct SSL3_STATE {
 };
 
 // lengths of messages
-#define DTLS1_COOKIE_LENGTH 256
-
 #define DTLS1_RT_HEADER_LENGTH 13
 
 #define DTLS1_HM_HEADER_LENGTH 12
@@ -2888,9 +2922,6 @@ struct DTLS1_STATE {
   // processed at least one message. This is used to detect whether we or the
   // peer sent the final flight.
   bool flight_has_reply : 1;
-
-  uint8_t cookie[DTLS1_COOKIE_LENGTH] = {0};
-  size_t cookie_len = 0;
 
   // The current data and handshake epoch.  This is initially undefined, and
   // starts at zero once the initial handshake is completed.
@@ -3082,6 +3113,10 @@ struct SSL_CONFIG {
 
   // permute_extensions is whether to permute extensions when sending messages.
   bool permute_extensions : 1;
+
+  // only_fips_cipher_suites_in_tls13 constrains the selection of cipher suites
+  // in TLS 1.3 such that only FIPS approved ones will be selected.
+  bool only_fips_cipher_suites_in_tls13 : 1;
 };
 
 // From RFC 8446, used in determining PSK modes.
@@ -3199,8 +3234,8 @@ ssl_open_record_t tls_open_app_data(SSL *ssl, Span<uint8_t> *out,
 ssl_open_record_t tls_open_change_cipher_spec(SSL *ssl, size_t *out_consumed,
                                               uint8_t *out_alert,
                                               Span<uint8_t> in);
-int tls_write_app_data(SSL *ssl, bool *out_needs_handshake, const uint8_t *buf,
-                       int len);
+int tls_write_app_data(SSL *ssl, bool *out_needs_handshake,
+                       size_t *out_bytes_written, Span<const uint8_t> in);
 
 bool tls_new(SSL *ssl);
 void tls_free(SSL *ssl);
@@ -3233,11 +3268,11 @@ ssl_open_record_t dtls1_open_change_cipher_spec(SSL *ssl, size_t *out_consumed,
                                                 Span<uint8_t> in);
 
 int dtls1_write_app_data(SSL *ssl, bool *out_needs_handshake,
-                         const uint8_t *buf, int len);
+                         size_t *out_bytes_written, Span<const uint8_t> in);
 
 // dtls1_write_record sends a record. It returns one on success and <= 0 on
 // error.
-int dtls1_write_record(SSL *ssl, int type, const uint8_t *buf, size_t len,
+int dtls1_write_record(SSL *ssl, int type, Span<const uint8_t> in,
                        enum dtls1_use_epoch_t use_epoch);
 
 int dtls1_retransmit_outgoing_messages(SSL *ssl);
@@ -3415,6 +3450,11 @@ struct ssl_ctx_st {
   // |SSL_CTX_set_min_proto_version|. Note this version is normalized in DTLS
   // and is further constrainted by |SSL_OP_NO_*|.
   uint16_t conf_min_version = 0;
+
+  // num_tickets is the number of tickets to send immediately after the TLS 1.3
+  // handshake. TLS 1.3 recommends single-use tickets so, by default, issue two
+  /// in case the client makes several connections before getting a renewal.
+  uint8_t num_tickets = 2;
 
   // quic_method is the method table corresponding to the QUIC hooks.
   const SSL_QUIC_METHOD *quic_method = nullptr;
@@ -3683,6 +3723,10 @@ struct ssl_ctx_st {
 
   // If enable_early_data is true, early data can be sent and accepted.
   bool enable_early_data : 1;
+
+  // only_fips_cipher_suites_in_tls13 constrains the selection of cipher suites
+  // in TLS 1.3 such that only FIPS approved ones will be selected.
+  bool only_fips_cipher_suites_in_tls13 : 1;
 
  private:
   ~ssl_ctx_st();

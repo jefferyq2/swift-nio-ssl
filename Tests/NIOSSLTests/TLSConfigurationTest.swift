@@ -19,6 +19,11 @@ import NIOPosix
 import NIOEmbedded
 @testable import NIOSSL
 import NIOTLS
+#if swift(>=5.8)
+@preconcurrency import Dispatch
+#else
+import Dispatch
+#endif
 
 class ErrorCatcher<T: Error>: ChannelInboundHandler {
     public typealias InboundIn = Any
@@ -264,10 +269,9 @@ class TLSConfigurationTest: XCTestCase {
     }
     
     // Note that this is a stub to create the rehash file format for a certificate.
-    // If needed in the future the numericExtension should be rework to check for duplicates and increment as applicable.
-    func getRehashFilename(path: String, numericExtension: Int) -> String {
+    // If needed in the future the numericExtension should be reworked to check for duplicates and increment as applicable.
+    func getRehashFilename(path: String, testName: String, numericExtension: Int) -> String {
         var cert: NIOSSLCertificate!
-        
         if path.suffix(4) == ".pem" {
             XCTAssertNoThrow(cert = try NIOSSLCertificate(file: path, format: .pem))
         } else {
@@ -275,9 +279,8 @@ class TLSConfigurationTest: XCTestCase {
         }
         // Create a rehash format filename to symlink the hard file above to.
         let originalSubjectName = cert.getSubjectNameHash()
-        let truncatedHash = String(format: "%08lx.0", originalSubjectName)
-        // Constr
-        let tempDirPath = FileManager.default.temporaryDirectory.path + "/"
+        let truncatedHash = String(format: "%08lx.%d", originalSubjectName, numericExtension)
+        let tempDirPath = FileManager.default.temporaryDirectory.path + "/" + testName + "/"
         return tempDirPath + truncatedHash
     }
 
@@ -629,15 +632,16 @@ class TLSConfigurationTest: XCTestCase {
     }
     
     func testRehashFormatToPopulateCANamesFromDirectory() throws {
+        // Use the test name as the directory name in the temporary directory.
+        let testName = String("\(#function)".dropLast(2))
         // Create 2 PEM based certs
-        let rootCAPathOne = try dumpToFile(data: .init(customCARoot.utf8), fileExtension: ".pem")
-        let rootCAPathTwo = try dumpToFile(data: .init(secondaryRootCertificateForClientAuthentication.utf8), fileExtension: ".pem")
+        let rootCAPathOne = try dumpToFile(data: .init(customCARoot.utf8), fileExtension: ".pem", customPath: testName)
+        let rootCAPathTwo = try dumpToFile(data: .init(secondaryRootCertificateForClientAuthentication.utf8), fileExtension: ".pem", customPath: testName)
         
         // Create a rehash formatted name of both certificate's subject name that was created above.
         // Take these rehash certificate names and format a symlink with them below with createSymbolicLink.
-        let rehashSymlinkNameOne = getRehashFilename(path: rootCAPathOne, numericExtension: 0)
-        let rehashSymlinkNameTwo = getRehashFilename(path: rootCAPathTwo, numericExtension: 0)
-        
+        let rehashSymlinkNameOne = getRehashFilename(path: rootCAPathOne, testName: testName, numericExtension: 0)
+        let rehashSymlinkNameTwo = getRehashFilename(path: rootCAPathTwo, testName: testName, numericExtension: 0)
         // Extract just the filename of the newly create certs in the tmp directory.
         let rootCAURLOne = URL(string: "file://" + rootCAPathOne)!
         let rootCAURLTwo = URL(string: "file://" + rootCAPathTwo)!
@@ -656,9 +660,12 @@ class TLSConfigurationTest: XCTestCase {
             XCTAssertNoThrow(try FileManager.default.removeItem(at: rootCAURLTwo))
             XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://" + rehashSymlinkNameOne)!))
             XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://" + rehashSymlinkNameTwo)!))
+            // Remove the actual directory also.
+            let removePath = "\(FileManager.default.temporaryDirectory.path)/\(testName)/"
+            XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://"  + removePath)!))
         }
         
-        let tempFileDir = FileManager.default.temporaryDirectory.path + "/"
+        let tempFileDir = FileManager.default.temporaryDirectory.path + "/\(testName)/"
         let digitalIdentities = try setupTLSLeafandClientIdentitiesFromCustomCARoot()
         
         // Server Configuration
@@ -678,6 +685,8 @@ class TLSConfigurationTest: XCTestCase {
     }
     
     func testRehashFormat() throws {
+        // Use the test name as the directory name in the temporary directory.
+        let testName = String("\(#function)".dropLast(2))
         // This test case creates path variables and files to run through the `isRehashFormat` function in `NIOSSLContext`.
         // Note that the c_rehash file format is a symlink to an original PEM or CER file in the form of HHHHHHHH.D.
         // Note that CRLs are not supported, only PEM and DER representations of certificates.
@@ -693,17 +702,17 @@ class TLSConfigurationTest: XCTestCase {
         XCTAssertFalse(acceptablePathBadRehashFormat)
         
         // Test with an actual file, but no symlink.
-        let dummyFile = try dumpToFile(data: Data(), fileExtension: ".txt")
-        let newPath = FileManager.default.temporaryDirectory.path + "/7f44456a.1"
+        let dummyFile = try dumpToFile(data: Data(), fileExtension: ".txt", customPath: testName)
+        let newPath = FileManager.default.temporaryDirectory.path + "/\(testName)/7f44456a.1"
         let _ = try FileManager.default.moveItem(atPath: dummyFile, toPath: newPath)
         // Filename is in rehash format, but not a symlink.
         let acceptablePathAndRehashFormatButNoSymlink = try NIOSSLContext._isRehashFormat(path: newPath)
         XCTAssertFalse(acceptablePathAndRehashFormatButNoSymlink)
         
         // Test actual symlink
-        let rootCAPathOne = try dumpToFile(data: .init(customCARoot.utf8), fileExtension: ".pem")
-        let rehashSymlinkName = getRehashFilename(path: rootCAPathOne, numericExtension: 0)
-        
+        let rootCAPathOne = try dumpToFile(data: .init(customCARoot.utf8), fileExtension: ".pem", customPath: testName)
+        let rehashSymlinkName = getRehashFilename(path: rootCAPathOne, testName: testName, numericExtension: 0)
+
         // Extract just the filename of the newly create certs in the tmp directory.
         let rootCAURLOne = URL(string: "file://" + rootCAPathOne)!
         let rootCAFilenameOne = rootCAURLOne.lastPathComponent
@@ -715,6 +724,9 @@ class TLSConfigurationTest: XCTestCase {
             XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://" + rootCAPathOne)!))
             XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://" + rehashSymlinkName)!))
             XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://" + newPath)!))
+            // Remove the actual directory also.
+            let removePath = "\(FileManager.default.temporaryDirectory.path)/\(testName)/"
+            XCTAssertNoThrow(try FileManager.default.removeItem(at: URL(string: "file://"  + removePath)!))
         }
         
         // Test the success case for the symlink
@@ -747,17 +759,15 @@ class TLSConfigurationTest: XCTestCase {
         let semaphore = DispatchSemaphore(value: 0)
         let group = DispatchGroup()
         let completionsQueue = DispatchQueue(label: "completionsQueue")
-        var completions: [Bool] = []
+        let completions: UnsafeMutableTransferBox<[Bool]> = .init([])
 
-        func keylogCallback(_ ign: ByteBuffer) {
+        let keylogManager = KeyLogCallbackManager { _ in
             completionsQueue.sync {
-                completions.append(true)
+                completions.wrappedValue.append(true)
                 semaphore.wait()
             }
             group.leave()
         }
-
-        let keylogManager = KeyLogCallbackManager(callback: keylogCallback(_:))
 
         // Now we call log twice, from different threads. These will not complete right away so we
         // do those on background threads. They should not both complete.
@@ -778,7 +788,7 @@ class TLSConfigurationTest: XCTestCase {
         semaphore.signal()
         semaphore.signal()
         group.wait()
-        XCTAssertEqual([true, true], completionsQueue.sync { completions })
+        XCTAssertEqual([true, true], completionsQueue.sync { completions.wrappedValue })
     }
     
     func testTheSameHashValue() {
@@ -1050,7 +1060,25 @@ class TLSConfigurationTest: XCTestCase {
     }
 
     func testBestEffortEquatableHashableDifferences() {
+        // If this assertion fails, DON'T JUST CHANGE THE NUMBER HERE! Make sure you've added any appropriate transforms below
+        // so that we're testing these best effort functions.
+        XCTAssertEqual(MemoryLayout<TLSConfiguration>.size, 194, "TLSConfiguration has changed size: you probably need to update this test!")
+
         let first = TLSConfiguration.makeClientConfiguration()
+        
+        let pskClientCallback: NIOPSKClientIdentityCallback = { (hint: String) -> PSKClientIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKClientIdentityResponse(key: psk, identity: "world")
+        }
+        
+        let pskServerCallback: NIOPSKServerIdentityCallback = { (hint: String, identity: String) -> PSKServerIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKServerIdentityResponse(key: psk)
+        }
 
         let transforms: [(inout TLSConfiguration) -> Void] = [
             { $0.minimumTLSVersion = .tlsv13 },
@@ -1068,6 +1096,10 @@ class TLSConfigurationTest: XCTestCase {
             { $0.shutdownTimeout = .seconds((60 * 24 * 24) + 1) },
             { $0.keyLogCallback = { _ in } },
             { $0.renegotiationSupport = .always },
+            { $0.sendCANameList = true },
+            { $0.pskClientCallback = pskClientCallback },
+            { $0.pskServerCallback = pskServerCallback},
+            { $0.pskHint = "hint" },
         ]
 
         for (index, transform) in transforms.enumerated() {
@@ -1117,6 +1149,144 @@ class TLSConfigurationTest: XCTestCase {
         var channelTLSVersion: TLSVersion?
         XCTAssertNoThrow(channelTLSVersion = try tlsVersionForChannel.wait())
         XCTAssertEqual(channelTLSVersion!, .tlsv11)
+    }
+    
+    func testTLSPSKWithTLS13() throws {
+        // The idea here is that adding PSKs with certificates in TLS 1.3 should NOT cause a failure.
+        // Also note that the usage here of PSKs with TLS 1.3 is not supported by BoringSSL at this point.
+        let pskClientCallback: NIOPSKClientIdentityCallback = { (hint: String) -> PSKClientIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKClientIdentityResponse(key: psk, identity: "world")
+        }
+        
+        let pskServerCallback: NIOPSKServerIdentityCallback = { (hint: String, identity: String) -> PSKServerIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKServerIdentityResponse(key: psk)
+        }
+        
+        var clientConfig = TLSConfiguration.makeClientConfiguration()
+        clientConfig.certificateVerification = .none
+        clientConfig.trustRoots = .certificates([])
+        clientConfig.minimumTLSVersion = .tlsv13
+        clientConfig.maximumTLSVersion = .tlsv13
+        clientConfig.pskClientCallback = pskClientCallback
+        clientConfig.pskHint = "pskHint"
+        
+        var serverConfig = TLSConfiguration.makeServerConfiguration(
+            certificateChain: [.certificate(TLSConfigurationTest.cert1)],
+            privateKey: .privateKey(TLSConfigurationTest.key1)
+        )
+        serverConfig.minimumTLSVersion = .tlsv13
+        serverConfig.maximumTLSVersion = .tlsv13
+        serverConfig.certificateVerification = .none
+        serverConfig.pskServerCallback = pskServerCallback
+        serverConfig.pskHint = "pskHint"
+        try assertHandshakeSucceeded(withClientConfig: clientConfig, andServerConfig: serverConfig)
+    }
+    
+    func testTLSPSKWithTLS12() throws {
+        // This test ensures that PSK-TLS is supported for TLS 1.2.
+        let pskClientCallback: NIOPSKClientIdentityCallback = { (hint: String) -> PSKClientIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKClientIdentityResponse(key: psk, identity: "world")
+        }
+        
+        let pskServerCallback: NIOPSKServerIdentityCallback = { (hint: String, identity: String) -> PSKServerIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKServerIdentityResponse(key: psk)
+        }
+        
+        var clientConfig = TLSConfiguration.makeClientConfiguration()
+        clientConfig.certificateVerification = .none
+        clientConfig.minimumTLSVersion = .tlsv1
+        clientConfig.maximumTLSVersion = .tlsv12
+        clientConfig.pskHint = "pskHint"
+        clientConfig.pskClientCallback = pskClientCallback
+        
+        var serverConfig = TLSConfiguration.makePreSharedKeyConfiguration()
+        serverConfig.minimumTLSVersion = .tlsv1
+        serverConfig.maximumTLSVersion = .tlsv12
+        serverConfig.pskServerCallback = pskServerCallback
+        serverConfig.pskHint = "pskHint"
+        try assertHandshakeSucceeded(withClientConfig: clientConfig, andServerConfig: serverConfig)
+    }
+    
+    func testTLSPSKWithPinnedCiphers() throws {
+        // This test ensures that PSK-TLS is supported with pinned ciphers.
+        let pskClientCallback: NIOPSKClientIdentityCallback = { (hint: String) -> PSKClientIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKClientIdentityResponse(key: psk, identity: "world")
+        }
+        
+        let pskServerCallback: NIOPSKServerIdentityCallback = { (hint: String, identity: String) -> PSKServerIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKServerIdentityResponse(key: psk)
+        }
+        
+        var clientConfig = TLSConfiguration.makeClientConfiguration()
+        clientConfig.certificateVerification = .none
+        clientConfig.minimumTLSVersion = .tlsv1
+        clientConfig.maximumTLSVersion = .tlsv12
+        clientConfig.pskClientCallback = pskClientCallback
+        clientConfig.pskHint = "pskHint"
+        clientConfig.cipherSuiteValues = [.TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA,
+                                          .TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA,
+                                          .TLS_PSK_WITH_AES_128_CBC_SHA,
+                                          .TLS_PSK_WITH_AES_256_CBC_SHA]
+        
+        var serverConfig = TLSConfiguration.makePreSharedKeyConfiguration()
+        serverConfig.minimumTLSVersion = .tlsv1
+        serverConfig.maximumTLSVersion = .tlsv12
+        serverConfig.pskServerCallback = pskServerCallback
+        serverConfig.pskHint = "pskHint"
+        serverConfig.cipherSuiteValues = [.TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA,
+                                          .TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA,
+                                          .TLS_PSK_WITH_AES_128_CBC_SHA,
+                                          .TLS_PSK_WITH_AES_256_CBC_SHA]
+        try assertHandshakeSucceeded(withClientConfig: clientConfig, andServerConfig: serverConfig)
+    }
+    
+    func testTLSPSKFailure() throws {
+        // This test ensures that different PSKs used on the client and server fail when passed in.
+        let pskClientCallback: NIOPSKClientIdentityCallback = { (hint: String) -> PSKClientIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("hello".utf8)
+            return PSKClientIdentityResponse(key: psk, identity: "world")
+        }
+        
+        let pskServerCallback: NIOPSKServerIdentityCallback = { (hint: String, identity: String) -> PSKServerIdentityResponse in
+            // Evaluate hint and clientIdentity to send back proper  PSK.
+            var psk = NIOSSLSecureBytes()
+            psk.append("server".utf8) // Failure
+            return PSKServerIdentityResponse(key: psk)
+        }
+        
+        var clientConfig = TLSConfiguration.makeClientConfiguration()
+        clientConfig.certificateVerification = .none
+        clientConfig.minimumTLSVersion = .tlsv1
+        clientConfig.maximumTLSVersion = .tlsv12
+        clientConfig.pskClientCallback = pskClientCallback
+        clientConfig.pskHint = "pskHint"
+        
+        var serverConfig = TLSConfiguration.makePreSharedKeyConfiguration()
+        serverConfig.minimumTLSVersion = .tlsv1
+        serverConfig.maximumTLSVersion = .tlsv12
+        serverConfig.pskServerCallback = pskServerCallback
+        serverConfig.pskHint = "pskHint"
+        try assertHandshakeError(withClientConfig: clientConfig, andServerConfig: serverConfig, errorTextContainsAnyOf: ["SSLV3_ALERT_BAD_RECORD_MAC"])
     }
 }
 

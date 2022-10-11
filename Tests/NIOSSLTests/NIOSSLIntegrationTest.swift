@@ -290,7 +290,14 @@ internal func serverTLSChannel(context: NIOSSLContext,
         }.bind(host: "127.0.0.1", port: 0).wait(), file: file, line: line)
 }
 
+#if swift(>=5.7)
+typealias SendableAdditionalPeerCertificateVerificationCallback = @Sendable (NIOSSLCertificate, Channel) -> EventLoopFuture<Void>
+#else
+typealias SendableAdditionalPeerCertificateVerificationCallback = (NIOSSLCertificate, Channel) -> EventLoopFuture<Void>
+#endif
+
 internal func clientTLSChannel(context: NIOSSLContext,
+                               additionalPeerCertificateVerificationCallback: SendableAdditionalPeerCertificateVerificationCallback? = nil,
                                preHandlers: [ChannelHandler],
                                postHandlers: [ChannelHandler],
                                group: EventLoopGroup,
@@ -299,7 +306,7 @@ internal func clientTLSChannel(context: NIOSSLContext,
                                file: StaticString = #file,
                                line: UInt = #line) throws -> Channel {
     func tlsFactory() -> NIOSSLClientTLSProvider<ClientBootstrap> {
-        return try! .init(context: context, serverHostname: serverHostname)
+        return try! .init(context: context, serverHostname: serverHostname, additionalPeerCertificateVerificationCallback: additionalPeerCertificateVerificationCallback)
     }
 
     return try _clientTLSChannel(context: context, preHandlers: preHandlers, postHandlers: postHandlers, group: group, connectingTo: connectingTo, tlsFactory: tlsFactory)
@@ -402,6 +409,29 @@ fileprivate func _clientTLSChannel<TLS: NIOClientTLSProvider>(context: NIOSSLCon
     .wait(), file: file, line: line)
 }
 
+struct EventLoopFutureTimeoutError: Error {}
+
+extension EventLoopFuture {
+    func timeout(after failDelay: TimeAmount) -> EventLoopFuture<Value> {
+        let promise = self.eventLoop.makePromise(of: Value.self)
+
+        self.whenComplete { result in
+            switch result {
+            case .success(let value):
+                promise.succeed(value)
+            case .failure(let error):
+                promise.fail(error)
+            }
+        }
+
+        self.eventLoop.scheduleTask(in: failDelay) {
+            promise.fail(EventLoopFutureTimeoutError())
+        }
+
+        return promise.futureResult
+    }
+}
+
 class NIOSSLIntegrationTest: XCTestCase {
     static var cert: NIOSSLCertificate!
     static var key: NIOSSLPrivateKey!
@@ -413,7 +443,7 @@ class NIOSSLIntegrationTest: XCTestCase {
         let (cert, key) = generateSelfSignedCert()
         NIOSSLIntegrationTest.cert = cert
         NIOSSLIntegrationTest.key = key
-        NIOSSLIntegrationTest.encryptedKeyPath = keyInFile(key: NIOSSLIntegrationTest.key, passphrase: "thisisagreatpassword")
+        NIOSSLIntegrationTest.encryptedKeyPath = try! keyInFile(key: NIOSSLIntegrationTest.key, passphrase: "thisisagreatpassword")
     }
 
     override class func tearDown() {
@@ -441,14 +471,20 @@ class NIOSSLIntegrationTest: XCTestCase {
         return try assertNoThrowWithValue(NIOSSLContext(configuration: config, passphraseCallback: passphraseCallback), file: file, line: line)
     }
 
-    private func configuredClientContext(file: StaticString = #file, line: UInt = #line) throws -> NIOSSLContext {
+    private func configuredClientContext(
+        file: StaticString = #file,
+        line: UInt = #line
+    ) throws -> NIOSSLContext {
         var config = TLSConfiguration.makeClientConfiguration()
         config.trustRoots = .certificates([NIOSSLIntegrationTest.cert])
-        return try assertNoThrowWithValue(NIOSSLContext(configuration: config), file: file, line: line)
+        return try assertNoThrowWithValue(NIOSSLContext(
+            configuration: config,
+            callbackManager: nil
+        ), file: file, line: line)
     }
 
-    static func keyInFile(key: NIOSSLPrivateKey, passphrase: String) -> String {
-        let fileName = makeTemporaryFile(fileExtension: ".pem")
+    static func keyInFile(key: NIOSSLPrivateKey, passphrase: String) throws -> String {
+        let fileName = try makeTemporaryFile(fileExtension: ".pem")
         let tempFile = open(fileName, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0o644)
         precondition(tempFile > 1, String(cString: strerror(errno)))
         let fileBio = CNIOBoringSSL_BIO_new_fp(fdopen(tempFile, "w+"), BIO_CLOSE)
@@ -467,7 +503,7 @@ class NIOSSLIntegrationTest: XCTestCase {
     }
 
     func withTrustBundleInFile<T>(tempFile fileName: inout String?, fn: (String) throws -> T) throws -> T {
-        fileName = makeTemporaryFile()
+        fileName = try makeTemporaryFile()
         guard let fileName = fileName else {
             fatalError("couldn't make temp file")
         }
@@ -896,6 +932,130 @@ class NIOSSLIntegrationTest: XCTestCase {
         var originalBuffer = clientChannel.allocator.buffer(capacity: 5)
         originalBuffer.writeString("Hello")
         let writeFuture = clientChannel.writeAndFlush(originalBuffer)
+        writeFuture.whenComplete { _ in
+            XCTAssertEqual(eventHandler.events[..<3], [.Registered, .Active, .UserEvent(.handshakeCompleted(negotiatedProtocol: nil))])
+        }
+        try writeFuture.wait()
+    }
+    
+    func testAdditionalValidationOnConnectionSucceeds() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer {
+            XCTAssertNoThrow(try group.syncShutdownGracefully())
+        }
+        
+        let serverCtx = try configuredSSLContext()
+        let clientCtx = try configuredClientContext()
+
+        let serverChannel = try serverTLSChannel(context: serverCtx,
+                                                 handlers: [],
+                                                 group: group)
+        defer {
+            XCTAssertNoThrow(try serverChannel.close().wait())
+        }
+
+        let eventHandler = EventRecorderHandler<TLSUserEvent>()
+        let clientChannel = try clientTLSChannel(context: clientCtx,
+                                                 additionalPeerCertificateVerificationCallback: { cert, channel in
+                                                     XCTAssertEqual(cert, Self.cert)
+                                                     return channel.eventLoop.makeSucceededFuture(())
+                                                 },
+                                                 preHandlers: [],
+                                                 postHandlers: [eventHandler],
+                                                 group: group,
+                                                 connectingTo: serverChannel.localAddress!,
+                                                 serverHostname: "localhost")
+
+        var originalBuffer = clientChannel.allocator.buffer(capacity: 5)
+        originalBuffer.writeString("Hello")
+        let writeFuture = clientChannel.writeAndFlush(originalBuffer)
+        writeFuture.whenComplete { _ in
+            XCTAssertEqual(eventHandler.events[..<3], [.Registered, .Active, .UserEvent(.handshakeCompleted(negotiatedProtocol: nil))])
+        }
+        try writeFuture.wait()
+    }
+    
+    func testAdditionalValidationOnConnectionFails() throws {
+        struct CustomUserError: Error {}
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer {
+            XCTAssertNoThrow(try group.syncShutdownGracefully())
+        }
+        
+        let serverCtx = try configuredSSLContext()
+        let clientCtx = try configuredClientContext()
+
+        let serverChannel = try serverTLSChannel(context: serverCtx,
+                                                 handlers: [],
+                                                 group: group)
+        defer {
+            XCTAssertNoThrow(try serverChannel.close().wait())
+        }
+        
+        let errorHandler = ErrorCatcher<Error>()
+        let clientChannel = try clientTLSChannel(
+            context: clientCtx,
+            additionalPeerCertificateVerificationCallback: { cert, channel in
+                XCTAssertEqual(cert, Self.cert)
+                return channel.eventLoop.makeFailedFuture(CustomUserError())
+            },
+            preHandlers: [],
+            postHandlers: [errorHandler],
+            group: group,
+            connectingTo: serverChannel.localAddress!,
+            serverHostname: "localhost"
+        )
+        
+        var originalBuffer = clientChannel.allocator.buffer(capacity: 5)
+        originalBuffer.writeString("Hello")
+        let writeFuture = clientChannel.writeAndFlush(originalBuffer)
+        let errorsFuture: EventLoopFuture<[Error]> = writeFuture.recover { (_: Error) in
+            // We're swallowing errors here, on purpose, because we'll definitely
+            // hit them.
+            return ()
+        }.map {
+            return errorHandler.errors
+        }
+        let actualErrors = try errorsFuture.wait()
+
+        // This write will have failed, but that's fine: we just want it as a signal that
+        // the handshake is done so we can make our assertions.
+        XCTAssertEqual(actualErrors.count, 1)
+        XCTAssertTrue(actualErrors.first is CustomUserError)
+    }
+    
+    func testFlushWhileAdditionalValidationIsInProgressDoesNotActuallyFlush() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer {
+            XCTAssertNoThrow(try group.syncShutdownGracefully())
+        }
+        
+        let additionalHandshakePromise = group.next().makePromise(of: Void.self)
+        let serverCtx = try configuredSSLContext()
+        let clientCtx = try configuredClientContext()
+
+        let serverChannel = try serverTLSChannel(context: serverCtx,
+                                                 handlers: [],
+                                                 group: group)
+        defer {
+            XCTAssertNoThrow(try serverChannel.close().wait())
+        }
+
+        let eventHandler = EventRecorderHandler<TLSUserEvent>()
+        let clientChannel = try clientTLSChannel(context: clientCtx,
+                                                 additionalPeerCertificateVerificationCallback: { cert, channel in
+                                                     XCTAssertEqual(cert, Self.cert)
+                                                     channel.flush()
+                                                     return additionalHandshakePromise.futureResult
+                                                 },
+                                                 preHandlers: [],
+                                                 postHandlers: [eventHandler],
+                                                 group: group,
+                                                 connectingTo: serverChannel.localAddress!,
+                                                 serverHostname: "localhost")
+        let writeFuture = clientChannel.writeAndFlush(ByteBuffer(string: "Hello"))
+        XCTAssertThrowsError(try writeFuture.timeout(after: .milliseconds(100)).wait())
+        additionalHandshakePromise.succeed(())
         writeFuture.whenComplete { _ in
             XCTAssertEqual(eventHandler.events[..<3], [.Registered, .Active, .UserEvent(.handshakeCompleted(negotiatedProtocol: nil))])
         }
@@ -1450,6 +1610,76 @@ class NIOSSLIntegrationTest: XCTestCase {
         XCTAssertThrowsError(try handshakeResultPromise.futureResult.wait())
     }
 
+    func testReadsAreUnbufferedAfterHandshake() throws {
+        // This is a regression test for rdar://96850712
+        var config = TLSConfiguration.makeServerConfiguration(
+            certificateChain: [.certificate(NIOSSLIntegrationTest.cert)],
+            privateKey: .privateKey(NIOSSLIntegrationTest.key)
+        )
+        config.certificateVerification = .noHostnameVerification
+        let context = try assertNoThrowWithValue(NIOSSLContext(configuration: config))
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer {
+            XCTAssertNoThrow(try group.syncShutdownGracefully())
+        }
+
+        var completionPromiseFired: Bool = false
+        let completionPromiseFiredLock = NIOLock()
+
+        let completionPromise: EventLoopPromise<ByteBuffer> = group.next().makePromise()
+        completionPromise.futureResult.whenComplete { _ in
+            completionPromiseFiredLock.withLock {
+                completionPromiseFired = true
+            }
+        }
+
+        var handshakeCompletePromise: EventLoopPromise<NIOSSLVerificationResult>? = nil
+        let handshakeFiredPromise: EventLoopPromise<Void> = group.next().makePromise()
+
+        let serverChannel: Channel = try serverTLSChannel(
+            context: context,
+            preHandlers: [],
+            postHandlers: [PromiseOnReadHandler(promise: completionPromise)],
+            group: group,
+            customVerificationCallback: { innerCertificates, promise in
+                handshakeCompletePromise = promise
+                handshakeFiredPromise.succeed(())
+            })
+        defer {
+            XCTAssertNoThrow(try serverChannel.close().wait())
+        }
+
+        let clientChannel = try clientTLSChannel(
+            context: try configuredSSLContext(),
+            preHandlers: [],
+            postHandlers: [],
+            group: group,
+            connectingTo: serverChannel.localAddress!
+        )
+        defer {
+            XCTAssertNoThrow(try clientChannel.close().wait())
+        }
+
+        var originalBuffer = clientChannel.allocator.buffer(capacity: 5)
+        originalBuffer.writeString("Hello")
+        clientChannel.writeAndFlush(originalBuffer, promise: nil)
+
+        // This has driven the handshake to begin, so we can wait for that.
+        XCTAssertNoThrow(try handshakeFiredPromise.futureResult.wait())
+
+        // We can now check whether the completion promise has fired: it should not have.
+        completionPromiseFiredLock.withLock {
+            XCTAssertFalse(completionPromiseFired)
+        }
+
+        // Ok, allow the handshake to run.
+        handshakeCompletePromise!.succeed(.certificateVerified)
+
+        let newBuffer = try completionPromise.futureResult.wait()
+        XCTAssertEqual(newBuffer, originalBuffer)
+    }
+
     func testNewCallbackCanDelayHandshake() throws {
         let context = try configuredSSLContext()
 
@@ -1459,7 +1689,7 @@ class NIOSSLIntegrationTest: XCTestCase {
         }
 
         var completionPromiseFired: Bool = false
-        let completionPromiseFiredLock = Lock()
+        let completionPromiseFiredLock = NIOLock()
 
         let completionPromise: EventLoopPromise<ByteBuffer> = group.next().makePromise()
         completionPromise.futureResult.whenComplete { _ in
@@ -1802,7 +2032,11 @@ class NIOSSLIntegrationTest: XCTestCase {
         buffer.writeStaticString("GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
 
         XCTAssertThrowsError(try clientChannel.writeInbound(buffer)) { error in
-            XCTAssertEqual(String(describing: error), "sslError([Error: 268435703 error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER])")
+            let errorString = String(describing: error)
+
+            let range = NSRange(location: 0, length: errorString.utf16.count)
+            let regex = try! NSRegularExpression(pattern: "sslError\\(\\[Error\\: 268435703 error\\:100000f7\\:SSL routines\\:OPENSSL_internal\\:WRONG_VERSION_NUMBER at .*\\/[A-Za-z_]+\\.cc\\:[0-9]+\\]\\)")
+            XCTAssertNotNil(regex.firstMatch(in: errorString, options: [], range: range))
         }
         (clientChannel.eventLoop as! EmbeddedEventLoop).run()
         XCTAssertTrue(clientClosed)
@@ -1936,11 +2170,11 @@ class NIOSSLIntegrationTest: XCTestCase {
     }
 
     func testKeyLoggingClientAndServer() throws {
-        var clientLines: [ByteBuffer] = []
-        var serverLines: [ByteBuffer] = []
+        let clientLines: UnsafeMutableTransferBox<[ByteBuffer]> = .init([])
+        let serverLines: UnsafeMutableTransferBox<[ByteBuffer]> = .init([])
 
-        let clientContext = try assertNoThrowWithValue(self.configuredSSLContext(keyLogCallback: { clientLines.append($0) }))
-        let serverContext = try assertNoThrowWithValue(self.configuredSSLContext(keyLogCallback: { serverLines.append($0) }))
+        let clientContext = try assertNoThrowWithValue(self.configuredSSLContext(keyLogCallback: { clientLines.wrappedValue.append($0) }))
+        let serverContext = try assertNoThrowWithValue(self.configuredSSLContext(keyLogCallback: { serverLines.wrappedValue.append($0) }))
 
         let serverChannel = EmbeddedChannel()
         let clientChannel = EmbeddedChannel()
@@ -1965,17 +2199,17 @@ class NIOSSLIntegrationTest: XCTestCase {
         XCTAssertTrue(handshakeHandler.handshakeSucceeded)
 
         // In our code this should do TLS 1.3, so we expect 5 lines each.
-        XCTAssertEqual(clientLines.count, 5)
-        XCTAssertEqual(serverLines.count, 5)
+        XCTAssertEqual(clientLines.wrappedValue.count, 5)
+        XCTAssertEqual(serverLines.wrappedValue.count, 5)
 
         // Each in the same order.
-        XCTAssertEqual(clientLines, serverLines)
+        XCTAssertEqual(clientLines.wrappedValue, serverLines.wrappedValue)
 
         // Each line should be newline terminated.
-        for line in clientLines {
+        for line in clientLines.wrappedValue {
             XCTAssertTrue(line.readableBytesView.last! == UInt8(ascii: "\n"))
         }
-        for line in serverLines {
+        for line in serverLines.wrappedValue {
             XCTAssertTrue(line.readableBytesView.last! == UInt8(ascii: "\n"))
         }
 
@@ -2179,5 +2413,71 @@ class NIOSSLIntegrationTest: XCTestCase {
 
         let newBuffer = try completionPromise.futureResult.wait()
         XCTAssertEqual(newBuffer, originalBuffer)
+    }
+
+    func testWriteSplitting() throws {
+        // This test validates that we chunk writes larger than a certain value. This is an attempt
+        // to regression test part of our defense against large writes, without requiring that the value end up being giant.
+        let maxWriteSize = 1024
+        let targetSize = (maxWriteSize * 4) + 1
+        let write = ByteBuffer(repeating: 0, count: targetSize)
+
+        let b2b = BackToBackEmbeddedChannel()
+
+        var clientConfig = TLSConfiguration.makeClientConfiguration()
+        clientConfig.certificateVerification = .noHostnameVerification
+        clientConfig.trustRoots = .certificates([Self.cert])
+
+        let serverConfig = TLSConfiguration.makeServerConfiguration(
+            certificateChain: [.certificate(Self.cert)],
+            privateKey: .privateKey(Self.key)
+        )
+
+        let clientContext = try assertNoThrowWithValue(NIOSSLContext(configuration: clientConfig))
+        let serverContext = try assertNoThrowWithValue(NIOSSLContext(configuration: serverConfig))
+        XCTAssertNoThrow(
+            try b2b.client.pipeline.syncOperations.addHandler(
+                try NIOSSLClientHandler(
+                    context: clientContext,
+                    serverHostname: "localhost",
+                    optionalCustomVerificationCallback: nil,
+                    optionalAdditionalPeerCertificateVerificationCallback: nil,
+                    maxWriteSize: maxWriteSize
+                )
+            )
+        )
+        XCTAssertNoThrow(
+            try b2b.server.pipeline.syncOperations.addHandler(
+                NIOSSLServerHandler(context: serverContext)
+            )
+        )
+        XCTAssertNoThrow(try b2b.connectInMemory())
+
+        var completed = false
+        let promise = b2b.loop.makePromise(of: Void.self)
+        promise.futureResult.whenComplete { _ in completed = true }
+
+        let recordObserver = TLS13RecordObserver()
+        XCTAssertNoThrow(
+            try b2b.client.pipeline.syncOperations.addHandler(
+                recordObserver,
+                position: .first
+            )
+        )
+
+        b2b.client.writeAndFlush(write, promise: promise)
+        try b2b.interactInMemory()
+
+        var reads: [ByteBuffer] = []
+        while let read = try b2b.server.readInbound(as: ByteBuffer.self) {
+            reads.append(read)
+        }
+        let totalReadBytes = reads.reduce(into: 0, { $0 += $1.readableBytes })
+        XCTAssertEqual(totalReadBytes, targetSize)
+        XCTAssertTrue(completed)
+        XCTAssertEqual(recordObserver.writtenRecords.filter { $0.contentType == .applicationData }.count, 5)
+
+        b2b.client.close(promise: nil)
+        try b2b.interactInMemory()
     }
 }

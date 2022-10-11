@@ -45,13 +45,13 @@ DSTROOT=Sources/CNIOBoringSSL
 TMPDIR=$(mktemp -d /tmp/.workingXXXXXX)
 SRCROOT="${TMPDIR}/src/boringssl.googlesource.com/boringssl"
 CROSS_COMPILE_TARGET_LOCATION="/Library/Developer/Destinations"
-CROSS_COMPILE_VERSION="5.1.1"
+CROSS_COMPILE_VERSION="5.6.1"
 
 # This function namespaces the awkward inline functions declared in OpenSSL
 # and BoringSSL.
 function namespace_inlines {
     # Pull out all STACK_OF functions.
-    STACKS=$(grep --no-filename -rE -e "DEFINE_(SPECIAL_)?STACK_OF\([A-Z_0-9a-z]+\)" -e "DEFINE_NAMED_STACK_OF\([A-Z_0-9a-z]+, +[A-Z_0-9a-z:]+\)" "$1/"* | grep -v '//' | grep -v '#' | gsed -e 's/DEFINE_\(SPECIAL_\)\?STACK_OF(\(.*\))/\2/' -e 's/DEFINE_NAMED_STACK_OF(\(.*\), .*)/\1/')
+    STACKS=$(grep --no-filename -rE -e "DEFINE_(SPECIAL_)?STACK_OF\([A-Z_0-9a-z]+\)" -e "DEFINE_NAMED_STACK_OF\([A-Z_0-9a-z]+, +[A-Z_0-9a-z:]+\)" "$1/"* | grep -v '//' | grep -v '#' | $sed -e 's/DEFINE_\(SPECIAL_\)\?STACK_OF(\(.*\))/\2/' -e 's/DEFINE_NAMED_STACK_OF(\(.*\), .*)/\1/')
     STACK_FUNCTIONS=("call_free_func" "call_copy_func" "call_cmp_func" "new" "new_null" "num" "zero" "value" "set" "free" "pop_free" "insert" "delete" "delete_ptr" "find" "shift" "push" "pop" "dup" "sort" "is_sorted" "set_cmp_func" "deep_copy")
 
     for s in $STACKS; do
@@ -61,7 +61,7 @@ function namespace_inlines {
     done
 
     # Now pull out all LHASH_OF functions.
-    LHASHES=$(grep --no-filename -rE "DEFINE_LHASH_OF\([A-Z_0-9a-z]+\)" "$1/"* | grep -v '//' | grep -v '#' | grep -v '\\$' | gsed 's/DEFINE_LHASH_OF(\(.*\))/\1/')
+    LHASHES=$(grep --no-filename -rE "DEFINE_LHASH_OF\([A-Z_0-9a-z]+\)" "$1/"* | grep -v '//' | grep -v '#' | grep -v '\\$' | $sed 's/DEFINE_LHASH_OF(\(.*\))/\1/')
     LHASH_FUNCTIONS=("call_cmp_func" "call_hash_func" "new" "free" "num_items" "retrieve" "call_cmp_key" "retrieve_key" "insert" "delete" "call_doall" "call_doall_arg" "doall" "doall_arg")
 
     for l in $LHASHES; do
@@ -82,11 +82,14 @@ function mangle_symbols {
 
         export GOPATH="${TMPDIR}"
 
-        # Begin by building for macOS.
-        swift build --product CNIOBoringSSL
+        # Begin by building for macOS. We build for two target triples, Intel
+        # and Apple Silicon
+        swift build --triple "x86_64-apple-macosx" --product CNIOBoringSSL
+        swift build --triple "arm64-apple-macosx" --product CNIOBoringSSL
         (
             cd "${SRCROOT}"
-            go run "util/read_symbols.go" -out "${TMPDIR}/symbols-macOS.txt" "${HERE}/.build/x86_64-apple-macosx/debug/libCNIOBoringSSL.a"
+            go run "util/read_symbols.go" -out "${TMPDIR}/symbols-macOS-intel.txt" "${HERE}/.build/x86_64-apple-macosx/debug/libCNIOBoringSSL.a"
+            go run "util/read_symbols.go" -out "${TMPDIR}/symbols-macOS-as.txt" "${HERE}/.build/arm64-apple-macosx/debug/libCNIOBoringSSL.a"
         )
 
         # Now build for iOS. We use xcodebuild for this because SwiftPM doesn't
@@ -95,14 +98,11 @@ function mangle_symbols {
         # If xcodebuild complains about not finding the scheme, make sure there
         # isn't a .xcodeproj kicking around.
         xcodebuild -sdk iphoneos -scheme CNIOBoringSSL -derivedDataPath "${TMPDIR}/iphoneos-deriveddata" -destination generic/platform=iOS
-        lipo -extract armv7 -output "${TMPDIR}/CNIOBoringSSL-iosarmv7.o" "${TMPDIR}/iphoneos-deriveddata/Build/Products/Debug-iphoneos/CNIOBoringSSL.o"
-        lipo -extract arm64 -output "${TMPDIR}/CNIOBoringSSL-iosarm64.o" "${TMPDIR}/iphoneos-deriveddata/Build/Products/Debug-iphoneos/CNIOBoringSSL.o"
-        ar -r "${TMPDIR}/libCNIOBoringSSL-iosarmv7.a" "${TMPDIR}/CNIOBoringSSL-iosarmv7.o"
-        ar -r "${TMPDIR}/libCNIOBoringSSL-iosarm64.a" "${TMPDIR}/CNIOBoringSSL-iosarm64.o"
+        ar -r "${TMPDIR}/libCNIOBoringSSL-iosarm64.a" "${TMPDIR}/iphoneos-deriveddata/Build/Products/Debug-iphoneos/CNIOBoringSSL.o"
 
         (
             cd "${SRCROOT}"
-            go run "util/read_symbols.go" -out "${TMPDIR}/symbols-iOS.txt" "${TMPDIR}/libCNIOBoringSSL-iosarmv7.a" "${TMPDIR}/libCNIOBoringSSL-iosarm64.a"
+            go run "util/read_symbols.go" -out "${TMPDIR}/symbols-iOS.txt" "${TMPDIR}/libCNIOBoringSSL-iosarm64.a"
         )
 
         # Now cross compile for our targets.
@@ -118,7 +118,7 @@ function mangle_symbols {
         # one go for all of them.
         (
             cd "${SRCROOT}"
-            go run "util/read_symbols.go" -obj-file-format elf -out "${TMPDIR}/symbols-linux-all.txt" "${HERE}"/.build/*-unknown-linux/debug/libCNIOBoringSSL.a
+            go run "util/read_symbols.go" -obj-file-format elf -out "${TMPDIR}/symbols-linux-all.txt" "${HERE}"/.build/*-unknown-linux-gnu/debug/libCNIOBoringSSL.a
         )
 
         # Now we concatenate all the symbols together and uniquify it.
@@ -172,7 +172,7 @@ function mangle_cpp_structures {
         # (as those were put there by the Swift runtime, not us). This gives us a list of symbols. The following cut command
         # grabs the type name from each of those (the bit preceding the '::'). Finally, we sort and uniqify that list. This gives us all the
         # structures that need to be renamed.
-        structures=$(nm -gUj "$HERE/.build/x86_64-apple-macosx/debug/libCNIOBoringSSL.a" | c++filt | grep "::" | grep -v -e "CNIOBoringSSL" -e "swift" | cut -d : -f1 | sort | uniq)
+        structures=$(nm -gUj "$(swift build --show-bin-path)/libCNIOBoringSSL.a" | c++filt | grep "::" | grep -v -e "CNIOBoringSSL" -e "swift" | cut -d : -f1 | sort | uniq)
 
         for struct in ${structures}; do
             echo "#define ${struct} BORINGSSL_ADD_PREFIX(BORINGSSL_PREFIX, ${struct})" >> "${DSTROOT}/include/CNIOBoringSSL_boringssl_prefix_symbols.h"
@@ -225,7 +225,7 @@ echo "GENERATING assembly helpers"
     cd "$SRCROOT"
     cd ..
     mkdir -p "${SRCROOT}/crypto/third_party/sike/asm"
-    python "${HERE}/scripts/build-asm.py"
+    python3 "${HERE}/scripts/build-asm.py"
 )
 
 PATTERNS=(
@@ -286,7 +286,7 @@ mangle_symbols
 
 # Removing ASM on 32 bit Apple platforms
 echo "REMOVING assembly on 32-bit Apple platforms"
-gsed -i "/#define OPENSSL_HEADER_BASE_H/a#if defined(__APPLE__) && defined(__i386__)\n#define OPENSSL_NO_ASM\n#endif" "$DSTROOT/include/openssl/base.h"
+$sed -i "/#define OPENSSL_HEADER_BASE_H/a#if defined(__APPLE__) && defined(__i386__)\n#define OPENSSL_NO_ASM\n#endif" "$DSTROOT/include/openssl/base.h"
 
 echo "RENAMING header files"
 (
@@ -314,6 +314,7 @@ echo "RENAMING header files"
 
 echo "PATCHING BoringSSL"
 git apply "${HERE}/scripts/patch-1-inttypes.patch"
+git apply "${HERE}/scripts/patch-2-inttypes.patch"
 
 # We need to avoid having the stack be executable. BoringSSL does this in its build system, but we can't.
 echo "PROTECTING against executable stacks"
@@ -355,6 +356,7 @@ cat << EOF > "$DSTROOT/include/CNIOBoringSSL.h"
 #include "CNIOBoringSSL_boringssl_prefix_symbols_asm.h"
 #include "CNIOBoringSSL_cast.h"
 #include "CNIOBoringSSL_chacha.h"
+#include "CNIOBoringSSL_ctrdrbg.h"
 #include "CNIOBoringSSL_cmac.h"
 #include "CNIOBoringSSL_conf.h"
 #include "CNIOBoringSSL_cpu.h"
@@ -371,6 +373,7 @@ cat << EOF > "$DSTROOT/include/CNIOBoringSSL.h"
 #include "CNIOBoringSSL_hmac.h"
 #include "CNIOBoringSSL_hpke.h"
 #include "CNIOBoringSSL_hrss.h"
+#include "CNIOBoringSSL_kdf.h"
 #include "CNIOBoringSSL_md4.h"
 #include "CNIOBoringSSL_md5.h"
 #include "CNIOBoringSSL_obj_mac.h"
@@ -384,11 +387,13 @@ cat << EOF > "$DSTROOT/include/CNIOBoringSSL.h"
 #include "CNIOBoringSSL_ripemd.h"
 #include "CNIOBoringSSL_rsa.h"
 #include "CNIOBoringSSL_safestack.h"
+#include "CNIOBoringSSL_service_indicator.h"
 #include "CNIOBoringSSL_sha.h"
 #include "CNIOBoringSSL_siphash.h"
 #include "CNIOBoringSSL_srtp.h"
 #include "CNIOBoringSSL_ssl.h"
 #include "CNIOBoringSSL_trust_token.h"
+#include "CNIOBoringSSL_type_check.h"
 #include "CNIOBoringSSL_x509_vfy.h"
 #include "CNIOBoringSSL_x509v3.h"
 
@@ -396,7 +401,7 @@ cat << EOF > "$DSTROOT/include/CNIOBoringSSL.h"
 EOF
 
 echo "RECORDING BoringSSL revision"
-$sed -i -e "s/BoringSSL Commit: [0-9a-f]\+/BoringSSL Commit: ${BORINGSSL_REVISION}/" "$HERE/Package.swift"
+$sed -i -e "s/BoringSSL Commit: [0-9a-f]\+/BoringSSL Commit: ${BORINGSSL_REVISION}/" "$HERE/Package"*.swift
 echo "This directory is derived from BoringSSL cloned from https://boringssl.googlesource.com/boringssl at revision ${BORINGSSL_REVISION}" > "$DSTROOT/hash.txt"
 
 echo "CLEANING temporary directory"

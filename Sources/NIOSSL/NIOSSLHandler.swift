@@ -16,15 +16,22 @@ import NIOCore
 @_implementationOnly import CNIOBoringSSL
 import NIOTLS
 
-/// The base class for all NIOSSL handlers. This class cannot actually be instantiated by
-/// users directly: instead, users must select which mode they would like their handler to
-/// operate in, client or server.
+/// The base class for all NIOSSL handlers.
+///
+/// This class cannot actually be instantiated by users directly: instead, users must select
+/// which mode they would like their handler to operate in, client or server.
 ///
 /// This class exists to deal with the reality that for almost the entirety of the lifetime
 /// of a TLS connection there is no meaningful distinction between a server and a client.
 /// For this reason almost the entirety of the implementation for the channel and server
 /// handlers in NIOSSL is shared, in the form of this parent class.
 public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, RemovableChannelHandler {
+    /// The default maximum write size. We cannot pass writes larger than this size to
+    /// BoringSSL.
+    ///
+    /// We have this default here instead of hardcoded into the software for testing purposes.
+    internal static let defaultMaxWriteSize = Int(CInt.max)
+
     public typealias OutboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
     public typealias InboundIn = ByteBuffer
@@ -33,6 +40,7 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
     private enum ConnectionState {
         case idle
         case handshaking
+        case additionalVerification
         case active
         case unwrapping(Scheduled<Void>)
         case closing(Scheduled<Void>)
@@ -49,6 +57,8 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
     private var didDeliverData: Bool = false
     private var storedContext: ChannelHandlerContext? = nil
     private var shutdownTimeout: TimeAmount
+    private let additionalPeerCertificateVerificationCallback: _NIOAdditionalPeerCertificateVerificationCallback?
+    private let maxWriteSize: Int
 
     // MARK: - Proxyman Start
 
@@ -60,10 +70,18 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
         return self.storedContext?.channel
     }
     
-    internal init(connection: SSLConnection, shutdownTimeout: TimeAmount) {
+    internal init(connection: SSLConnection, shutdownTimeout: TimeAmount, additionalPeerCertificateVerificationCallback: _NIOAdditionalPeerCertificateVerificationCallback?, maxWriteSize: Int) {
+        let configuration = connection.parentContext.configuration
+        precondition(
+            additionalPeerCertificateVerificationCallback == nil ||
+            configuration.certificateVerification != .none,
+            "TLSConfiguration.certificateVerification must be either set to .noHostnameVerification or .fullVerification if additionalPeerCertificateVerificationCallback is specified"
+        )
         self.connection = connection
         self.bufferedWrites = MarkedCircularBuffer(initialCapacity: 96)  // 96 brings the total size of the buffer to just shy of one page
         self.shutdownTimeout = shutdownTimeout
+        self.additionalPeerCertificateVerificationCallback = additionalPeerCertificateVerificationCallback
+        self.maxWriteSize = maxWriteSize
     }
 
     public func handlerAdded(context: ChannelHandlerContext) {
@@ -120,6 +138,13 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
             // We use a synthetic error here as the error stack will be empty, and we should try to
             // provide some diagnostic help.
             channelError = NIOSSLError.handshakeFailed(.sslError([.eofDuringHandshake]))
+        case .additionalVerification:
+            // In this case the channel is going through the doHandshake steps and
+            // a channelInactive is fired taking down the connection.
+            // This case propogates a .handshakeFailed instead of an .uncleanShutdown.
+            // We use a synthetic error here as the error stack will be empty, and we should try to
+            // provide some diagnostic help.
+            channelError = NIOSSLError.handshakeFailed(.sslError([.eofDuringAdditionalCertficiateChainValidation]))
         default:
             // This is a ragged EOF: we weren't sent a CLOSE_NOTIFY. We want to send a user
             // event to notify about this before we propagate channelInactive. We also want to fail all
@@ -177,8 +202,14 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
     }
 
     public func flush(context: ChannelHandlerContext) {
-        bufferFlush()
-        doUnbufferWrites(context: context)
+        switch self.state {
+        case .idle, .handshaking, .additionalVerification:
+            // we should not flush immediately as we have not completed the handshake and instead buffer the flush
+            self.bufferFlush()
+        case .active, .unwrapping, .closing, .unwrapped, .closed:
+            self.bufferFlush()
+            self.doUnbufferWrites(context: context)
+        }
     }
     
     public func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
@@ -214,7 +245,7 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
             // For idle, closed, and unwrapped connections we immediately pass this on to the next
             // channel handler.
             context.close(promise: promise)
-        case .active, .handshaking:
+        case .active, .handshaking, .additionalVerification:
             // We need to begin processing shutdown now. We can't fire the promise for a
             // while though.
             self.state = .closing(self.scheduleTimedOutShutdown(context: context))
@@ -247,24 +278,32 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
                 channelClose(context: context, reason: error)
                 return
             }
+            
+            if let additionalPeerCertificateVerificationCallback = self.additionalPeerCertificateVerificationCallback {
+                state = .additionalVerification
+                guard let peerCertificate = connection.getPeerCertificate() else {
+                    preconditionFailure("""
+                        Couldn't get peer certificate after chain verification was successful.
+                        This should be impossible as we have a precondition during creation of this handler that requires certificate verification.
+                        Please file an issue.
+                    """)
+                }
+                additionalPeerCertificateVerificationCallback(peerCertificate, context.channel)
+                    .hop(to: context.eventLoop)
+                    .whenComplete { result in
+                        self.completedAdditionalPeerCertificateVerification(result: result)
+                    }
+                return
+            }
 
             state = .active
-            writeDataToNetwork(context: context, promise: nil)
 
             // MARK: - Proxyman Start
             let tlsVersion = connection.getTLSVersion()
             connectionOnComplete?(tlsVersion)
             // MARK: - Proxyman End
 
-            // TODO(cory): This event should probably fire out of the BoringSSL info callback.
-            let negotiatedProtocol = connection.getAlpnProtocol()
-            context.fireUserInboundEventTriggered(TLSUserEvent.handshakeCompleted(negotiatedProtocol: negotiatedProtocol))
-            
-            // We need to unbuffer any pending writes and reads. We will have pending writes if the user attempted to
-            // write before we completed the handshake. We may also have pending reads if the user sent data immediately
-            // after their FINISHED record. We decode the reads first, as those reads may trigger writes.
-            self.doDecodeData(context: context)
-            self.doUnbufferWrites(context: context)
+            completeHandshake(context: context)
         case .failed(let err):
             writeDataToNetwork(context: context, promise: nil)
             
@@ -275,6 +314,49 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
             context.fireErrorCaught(NIOSSLError.handshakeFailed(err))
             channelClose(context: context, reason: NIOSSLError.handshakeFailed(err))
+        }
+    }
+    
+    private func completeHandshake(context: ChannelHandlerContext) {
+        writeDataToNetwork(context: context, promise: nil)
+
+        // TODO(cory): This event should probably fire out of the BoringSSL info callback.
+        let negotiatedProtocol = connection.getAlpnProtocol()
+        context.fireUserInboundEventTriggered(TLSUserEvent.handshakeCompleted(negotiatedProtocol: negotiatedProtocol))
+        
+        // We need to unbuffer any pending writes and reads. We will have pending writes if the user attempted to
+        // write before we completed the handshake. We may also have pending reads if the user sent data immediately
+        // after their FINISHED record. We decode the reads first, as those reads may trigger writes.
+        self.doDecodeData(context: context)
+        if let receiveBuffer = self.plaintextReadBuffer {
+            self.doFlushReadData(context: context, receiveBuffer: receiveBuffer, readOnEmptyBuffer: false)
+        }
+        self.doUnbufferWrites(context: context)
+    }
+    
+    private func completedAdditionalPeerCertificateVerification(result: Result<Void, Error>) {
+        guard let context = self.storedContext else {
+            // `self` may already be removed from the channel pipeline
+            return
+        }
+        context.eventLoop.preconditionInEventLoop()
+        
+        switch self.state {
+        case .idle, .handshaking, .active:
+            preconditionFailure("invalid state \(self.state)")
+        case .additionalVerification:
+            switch result {
+            case .failure(let error):
+                // This counts as a failure.
+                context.fireErrorCaught(error)
+                channelClose(context: context, reason: error)
+            case .success:
+                state = .active
+                completeHandshake(context: context)
+            }
+        case .unwrapping, .closing, .unwrapped, .closed:
+            break
+            // we are already about to close, we can safely ignore this event
         }
     }
 
@@ -341,7 +423,7 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
     private func scheduleTimedOutShutdown(context: ChannelHandlerContext) -> Scheduled<Void> {
         return context.eventLoop.scheduleTask(in: self.shutdownTimeout) {
             switch self.state {
-            case .idle, .handshaking, .active:
+            case .idle, .handshaking, .additionalVerification, .active:
                 preconditionFailure("Cannot schedule timed out shutdown on non-shutting down handler")
 
             case .closed, .unwrapped:
@@ -392,7 +474,7 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
             case .failed(BoringSSLError.zeroReturn):
                 switch self.state {
-                case .idle, .handshaking:
+                case .idle, .handshaking, .additionalVerification:
                     preconditionFailure("Should not get zeroReturn in \(self.state)")
                 case .closed, .unwrapped:
                     // This is an unexpected place to be, but it's not totally impossible. Assume this
@@ -557,15 +639,23 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
     }
 }
 
+#if swift(>=5.6)
+@available(*, unavailable)
+extension NIOSSLHandler: Sendable {}
+#endif
+
 extension NIOSSLHandler {
-    /// Variable that can be queried during the connection lifecycle to grab the `TLSVersion` used on the `SSLConnection`.
+    /// Variable that can be queried during the connection lifecycle to grab the ``TLSVersion`` used on this connection.
+    ///
+    /// This variable **is not thread-safe**: you **must** call it from the correct event
+    /// loop thread.
     public var tlsVersion: TLSVersion? {
         return self.connection.getTLSVersionForConnection()
     }
 }
 
 extension Channel {
-    ///  API to extract the `TLSVersion` from an EventLoopFuture.
+    ///  API to extract the ``TLSVersion`` from off the `Channel`.
     public func nioSSL_tlsVersion() -> EventLoopFuture<TLSVersion?> {
         return self.pipeline.handler(type: NIOSSLHandler.self).map {
             $0.tlsVersion
@@ -574,7 +664,7 @@ extension Channel {
 }
 
 extension ChannelPipeline.SynchronousOperations {
-    /// API to query the `TLSVersion` directly from the `ChannelPipeline`.
+    /// API to query the ``TLSVersion`` directly from the `ChannelPipeline`.
     public func nioSSL_tlsVersion() throws -> TLSVersion? {
         let handler = try self.handler(type: NIOSSLHandler.self)
         return handler.tlsVersion
@@ -587,8 +677,8 @@ extension NIOSSLHandler {
     /// from the pipeline. This will leave the connection established, but remove the TLS wrapper
     /// from it.
     ///
-    /// This will send a CLOSE_NOTIFY and wait for the corresponding CLOSE_NOTIFY. When that next
-    /// CLOSE_NOTIFY is received, this handler will pass on all pending writes and remove itself
+    /// This will send a `CLOSE_NOTIFY` and wait for the corresponding `CLOSE_NOTIFY`. When that next
+    /// `CLOSE_NOTIFY` is received, this handler will pass on all pending writes and remove itself
     /// from the channel pipeline. If the shutdown times out then an error will fire down the
     /// pipeline, this handler will remove itself from the pipeline, but the channel will not be
     /// automatically closed.
@@ -620,7 +710,7 @@ extension NIOSSLHandler {
             self.shutdownPromise = promise
             self.channelUnwrap(context: storedContext)
 
-        case .handshaking, .active:
+        case .handshaking, .active, .additionalVerification:
             // Time to try to strip TLS.
             guard let storedContext = self.storedContext else {
                 promise?.fail(NIOTLSUnwrappingError.invalidInternalState)
@@ -647,6 +737,19 @@ extension NIOSSLHandler {
     private typealias BufferedWrite = (data: ByteBuffer, promise: EventLoopPromise<Void>?)
 
     private func bufferWrite(data: ByteBuffer, promise: EventLoopPromise<Void>?) {
+        var data = data
+
+        // Here we guard against the possibility that any of these writes are larger than CInt.max.
+        // This is very unusual but it can happen. To work around it, we just pretend that there were
+        // multiple writes.
+        //
+        // During the short writes we set the promise to `nil` to make sure they only arrive at the end.
+        // Note that we make sure that there's always a single write, at the end, that holds the promise.
+        while data.readableBytes > self.maxWriteSize, let slice = data.readSlice(length: self.maxWriteSize) {
+            bufferedWrites.append((data: slice, promise: nil))
+        }
+
+        assert(data.readableBytes <= maxWriteSize)
         bufferedWrites.append((data: data, promise: promise))
     }
 

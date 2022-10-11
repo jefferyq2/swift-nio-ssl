@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import NIOCore
 @_implementationOnly import CNIOBoringSSL
 @_implementationOnly import CNIOBoringSSLShims
 
@@ -29,16 +30,20 @@ public struct _SubjectAlternativeNames {
     @usableFromInline
     internal final class Storage {
         
-        fileprivate let nameStack: OpaquePointer
+        fileprivate let nameStack: OpaquePointer?
         @usableFromInline internal let stackSize: Int
-
-        internal init(nameStack: OpaquePointer) {
+        
+        internal init(nameStack: OpaquePointer?) {
             self.nameStack = nameStack
-            self.stackSize = CNIOBoringSSLShims_sk_GENERAL_NAME_num(nameStack)
+            if let nameStack = nameStack {
+                self.stackSize = CNIOBoringSSLShims_sk_GENERAL_NAME_num(nameStack)
+            } else {
+                self.stackSize = 0
+            }
         }
         
         public subscript(position: Int) -> Element {
-            guard let name = CNIOBoringSSLShims_sk_GENERAL_NAME_value(self.nameStack, position) else {
+            guard let name = CNIOBoringSSLShims_sk_GENERAL_NAME_value(self.nameStack!, position) else {
                 fatalError("Unexpected null pointer when unwrapping SAN value")
             }
             
@@ -50,17 +55,24 @@ public struct _SubjectAlternativeNames {
         }
 
         deinit {
-            CNIOBoringSSL_GENERAL_NAMES_free(self.nameStack)
+            if let nameStack = self.nameStack {
+                CNIOBoringSSL_GENERAL_NAMES_free(nameStack)
+            }
         }
     }
     
     
     @usableFromInline internal var storage: Storage
     
-    internal init(nameStack: OpaquePointer) {
+    internal init(nameStack: OpaquePointer?) {
         self.storage = .init(nameStack: nameStack)
     }
 }
+
+#if swift(>=5.5) && canImport(_Concurrency)
+// _SubjectAlternativeNames is immutable and therefore Sendable
+extension _SubjectAlternativeNames: @unchecked Sendable {}
+#endif
 
 extension _SubjectAlternativeNames: RandomAccessCollection {
     
@@ -75,7 +87,7 @@ extension _SubjectAlternativeNames: RandomAccessCollection {
 
 public struct _SubjectAlternativeName {
     
-    public struct NameType: Hashable {
+    public struct NameType: Hashable, NIOSendable {
         public var rawValue: Int
 
         public init(_ rawCode: Int) {
@@ -119,6 +131,14 @@ public struct _SubjectAlternativeName {
     public var nameType: NameType
     public var contents: Contents
 }
+
+#if swift(>=5.5) && canImport(_Concurrency)
+// _SubjectAlternativeName is immutable and therefore Sendable
+extension _SubjectAlternativeName: @unchecked Sendable {}
+
+// _SubjectAlternativeName.Contents is immutable and therefore Sendable
+extension _SubjectAlternativeName.Contents: @unchecked Sendable {}
+#endif
 
 extension _SubjectAlternativeName.Contents: RandomAccessCollection {
     

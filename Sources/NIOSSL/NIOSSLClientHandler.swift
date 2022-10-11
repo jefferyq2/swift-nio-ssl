@@ -52,10 +52,16 @@ extension String {
 
 /// A channel handler that wraps a channel in TLS using NIOSSL.
 /// This handler can be used in channels that are acting as the client
-/// in the TLS dialog. For server connections, use the `NIOSSLServerHandler`.
+/// in the TLS dialog. For server connections, use the ``NIOSSLServerHandler``.
 public final class NIOSSLClientHandler: NIOSSLHandler {
+    /// Construct a new ``NIOSSLClientHandler`` with the given `context` and a specific `serverHostname`.
+    ///
+    /// - parameters:
+    ///     - context: The ``NIOSSLContext`` to use on this connection.
+    ///     - serverHostname: The hostname of the server we're trying to connect to, if known. This will be used in the SNI extension,
+    ///         and used to validate the server certificate.
     public convenience init(context: NIOSSLContext, serverHostname: String?) throws {
-        try self.init(context: context, serverHostname: serverHostname, optionalCustomVerificationCallback: nil)
+        try self.init(context: context, serverHostname: serverHostname, optionalCustomVerificationCallback: nil, optionalAdditionalPeerCertificateVerificationCallback: nil)
     }
 
     @available(*, deprecated, renamed: "init(context:serverHostname:customVerificationCallback:)")
@@ -80,16 +86,40 @@ public final class NIOSSLClientHandler: NIOSSLHandler {
             connection.setVerificationCallback(verificationCallback)
         }
 
-        super.init(connection: connection, shutdownTimeout: context.configuration.shutdownTimeout)
+        super.init(connection: connection, shutdownTimeout: context.configuration.shutdownTimeout, additionalPeerCertificateVerificationCallback: nil, maxWriteSize: NIOSSLHandler.defaultMaxWriteSize)
     }
 
-
+    /// Construct a new ``NIOSSLClientHandler`` with the given `context` and a specific `serverHostname`.
+    ///
+    /// - parameters:
+    ///     - context: The ``NIOSSLContext`` to use on this connection.
+    ///     - serverHostname: The hostname of the server we're trying to connect to, if known. This will be used in the SNI extension,
+    ///         and used to validate the server certificate.
+    ///     - customVerificationCallback: A callback to use that will override NIOSSL's normal verification logic.
+    ///
+    ///         If set, this callback is provided the certificates presented by the peer. NIOSSL will not have pre-processed them. The callback will not be used if the
+    ///         ``TLSConfiguration`` that was used to construct the ``NIOSSLContext`` has ``TLSConfiguration/certificateVerification`` set to ``CertificateVerification/none``.
     public convenience init(context: NIOSSLContext, serverHostname: String?, customVerificationCallback: @escaping NIOSSLCustomVerificationCallback) throws {
-        try self.init(context: context, serverHostname: serverHostname, optionalCustomVerificationCallback: customVerificationCallback)
+        try self.init(context: context, serverHostname: serverHostname, optionalCustomVerificationCallback: customVerificationCallback, optionalAdditionalPeerCertificateVerificationCallback: nil)
+    }
+    
+    /// - warning: This API is not guaranteed to be stable and is likely to be changed without further notice, hence the underscore prefix.
+    public static func _makeSSLClientHandler(
+        context: NIOSSLContext,
+        serverHostname: String?,
+        additionalPeerCertificateVerificationCallback: @escaping _NIOAdditionalPeerCertificateVerificationCallback
+    ) throws -> Self {
+        try .init(context: context, serverHostname: serverHostname, optionalCustomVerificationCallback: nil, optionalAdditionalPeerCertificateVerificationCallback: additionalPeerCertificateVerificationCallback)
     }
 
     // This exists to handle the explosion of initializers we got when I tried to deprecate the first one. At least they all pass through one path now.
-    private init(context: NIOSSLContext, serverHostname: String?, optionalCustomVerificationCallback: NIOSSLCustomVerificationCallback?) throws {
+    internal init(
+        context: NIOSSLContext,
+        serverHostname: String?,
+        optionalCustomVerificationCallback: NIOSSLCustomVerificationCallback?,
+        optionalAdditionalPeerCertificateVerificationCallback: _NIOAdditionalPeerCertificateVerificationCallback?,
+        maxWriteSize: Int = defaultMaxWriteSize
+    ) throws {
         guard let connection = context.createConnection() else {
             fatalError("Failed to create new connection in NIOSSLContext")
         }
@@ -110,6 +140,16 @@ public final class NIOSSLClientHandler: NIOSSLHandler {
             connection.setCustomVerificationCallback(CustomVerifyManager(callback: verificationCallback))
         }
 
-        super.init(connection: connection, shutdownTimeout: context.configuration.shutdownTimeout)
+        super.init(
+            connection: connection,
+            shutdownTimeout: context.configuration.shutdownTimeout,
+            additionalPeerCertificateVerificationCallback: optionalAdditionalPeerCertificateVerificationCallback,
+            maxWriteSize: maxWriteSize
+        )
     }
 }
+
+#if swift(>=5.6)
+@available(*, unavailable)
+extension NIOSSLClientHandler: Sendable {}
+#endif

@@ -24,7 +24,7 @@ import Glibc
 #endif
 
 /// The result of an attempt to verify an X.509 certificate.
-public enum NIOSSLVerificationResult {
+public enum NIOSSLVerificationResult: NIOSendable {
     /// The certificate was successfully verified.
     case certificateVerified
 
@@ -50,20 +50,20 @@ public enum NIOSSLVerificationResult {
 /// from root to leaf, ending with the peer's leaf certificate. Each time it is invoked with 2 arguments:
 ///
 /// 1. The result of the BoringSSL verification for this certificate
-/// 2. The `SSLCertificate` for this level of the chain.
+/// 2. The ``NIOSSLCertificate`` for this level of the chain.
 ///
 /// Please be cautious with calling out from this method. This method is always invoked on the event loop,
 /// so you must not block or wait. It is not possible to return an `EventLoopFuture` from this method, as it
 /// must not block or wait. Additionally, this method must take care to ensure that it does not cause any
-/// ChannelHandler to recursively call back into the `NIOSSLHandler` that triggered it, as making re-entrant
+/// ChannelHandler to recursively call back into the ``NIOSSLHandler`` that triggered it, as making re-entrant
 /// calls into BoringSSL is not supported by SwiftNIO and leads to undefined behaviour.
 ///
 /// In general, the only safe thing to do here is to either perform some cryptographic operations, to log,
-/// or to store the `NIOSSLCertificate` somewhere for later consumption. The easiest way to be sure that the
-/// `NIOSSLCertificate` is safe to consume is to wait for a user event that shows the handshake as completed,
+/// or to store the ``NIOSSLCertificate`` somewhere for later consumption. The easiest way to be sure that the
+/// ``NIOSSLCertificate`` is safe to consume is to wait for a user event that shows the handshake as completed,
 /// or for channelInactive.
 ///
-/// warning: This callback uses the old-style OpenSSL callback behaviour and is excessively complex to program with.
+/// > Warning: This callback uses the old-style OpenSSL callback behaviour and is excessively complex to program with.
 ///    Instead, prefer using the NIOSSLCustomVerificationCallback style which receives the entire trust chain at once,
 ///    and also supports asynchronous certificate verification.
 public typealias NIOSSLVerificationCallback = (NIOSSLVerificationResult, NIOSSLCertificate) -> NIOSSLVerificationResult
@@ -82,14 +82,41 @@ public typealias NIOSSLVerificationCallback = (NIOSSLVerificationResult, NIOSSLC
 /// when the verification is complete you must complete the provided `EventLoopPromise`.
 ///
 /// This method must take care to ensure that it does not cause any `ChannelHandler` to recursively call back into
-/// the `NIOSSLHandler` that triggered it, as making re-entrant calls into BoringSSL is not supported by SwiftNIO and
-/// leads to undefined behaviour. It is acceptable to leave the event loop context and then call into the `NIOSSLHandler`,
+/// the ``NIOSSLHandler`` that triggered it, as making re-entrant calls into BoringSSL is not supported by SwiftNIO and
+/// leads to undefined behaviour. It is acceptable to leave the event loop context and then call into the ``NIOSSLHandler``,
 /// as this will not be re-entrant.
 ///
 /// Note that setting this callback will override _all_ verification logic that BoringSSL provides.
 public typealias NIOSSLCustomVerificationCallback = ([NIOSSLCertificate], EventLoopPromise<NIOSSLVerificationResult>) -> Void
 
+/// A custom verification callback that allows additional peer certificate verification logic after the logic of BoringSSL has completed successfully.
+///
+/// It is invoked with two arguments:
+/// 1. The verified leaf certificate from the peer certificate chain
+/// 2. The channel to which the certificate belongs
+///
+/// The handshake will only succeed if the returned promise completes successfully.
+///
+/// - warning: This API is not guaranteed to be stable and is likely to be changed without further notice, hence the underscore prefix.
+public typealias _NIOAdditionalPeerCertificateVerificationCallback = (NIOSSLCertificate, Channel) -> EventLoopFuture<Void>
 
+
+#if swift(>=5.6)
+/// A callback that can be used to implement `SSLKEYLOGFILE` support.
+///
+/// Wireshark can decrypt packet captures that contain encrypted TLS connections if they have access to the
+/// session keys used to perform the encryption. These keys are normally stored in a file that has a specific
+/// file format. This callback is the low-level primitive that can be used to write such a file.
+///
+/// When set, this callback will be invoked once per secret. The provided `ByteBuffer` will contain the bytes
+/// that need to be written into the file, including the newline character.
+///
+/// - warning: Please be aware that enabling support for `SSLKEYLOGFILE` through this callback will put the secrecy of
+///     your connections at risk. You should only do so when you are confident that it will not be possible to
+///     extract those secrets unnecessarily.
+///
+public typealias NIOSSLKeyLogCallback = @Sendable (ByteBuffer) -> Void
+#else
 /// A callback that can be used to implement `SSLKEYLOGFILE` support.
 ///
 /// Wireshark can decrypt packet captures that contain encrypted TLS connections if they have access to the
@@ -104,6 +131,7 @@ public typealias NIOSSLCustomVerificationCallback = ([NIOSSLCertificate], EventL
 ///     extract those secrets unnecessarily.
 ///
 public typealias NIOSSLKeyLogCallback = (ByteBuffer) -> Void
+#endif
 
 
 /// An object that provides helpers for working with a NIOSSLKeyLogCallback
@@ -130,6 +158,65 @@ extension KeyLogCallbackManager {
     }
 }
 
+/// PSK Server Identity response type used in the callback.
+public struct PSKServerIdentityResponse: NIOSendable {
+    /// The negotiated PSK.
+    public var key: NIOSSLSecureBytes
+
+    /// Constructs a ``PSKServerIdentityResponse``.
+    ///
+    /// - parameter key: The negotiated PSK.
+    public init(key: NIOSSLSecureBytes) {
+        self.key = key
+    }
+}
+/// PSK Client Identity response type used in the callback.
+public struct PSKClientIdentityResponse: NIOSendable {
+    /// The negotiated PSK.
+    public var key: NIOSSLSecureBytes
+
+    /// The identity of the PSK.
+    public var identity: String
+
+    /// Constructs a ``PSKClientIdentityResponse``.
+    ///
+    /// - parameter key: The negotiated PSK.
+    /// - parameter identity: The identity of the PSK.
+    public init(key: NIOSSLSecureBytes, identity: String) {
+        self.key = key
+        self.identity = identity
+    }
+}
+
+#if swift(>=5.7)
+/// The callback used for providing a PSK on the client side.
+///
+/// The callback is invoked on the event loop with the PSK hint. This callback must complete synchronously: it cannot return a future.
+/// Additionally, as it is invoked on the NIO event loop, it is not possible for this to perform any I/O. As a result, lookups must be quick.
+public typealias NIOPSKClientIdentityCallback = @Sendable (String) throws -> PSKClientIdentityResponse
+#else
+/// The callback used for providing a PSK on the client side.
+///
+/// The callback is invoked on the event loop with the PSK hint. This callback must complete synchronously: it cannot return a future.
+/// Additionally, as it is invoked on the NIO event loop, it is not possible for this to perform any I/O. As a result, lookups must be quick.
+public typealias NIOPSKClientIdentityCallback = (String) throws -> PSKClientIdentityResponse
+#endif
+
+#if swift(>=5.7)
+/// The callback used for providing a PSK on the server side.
+///
+/// The callback is invoked on the event loop with the PSK hint provided by the server, and the PSK identity provided by the client.
+/// This callback must complete synchronously: it cannot return a future. Additionally, as it is invoked on the NIO event loop, it is
+/// not possible for this to perform any I/O. As a result, lookups must be quick.
+public typealias NIOPSKServerIdentityCallback = @Sendable (String, String) throws -> PSKServerIdentityResponse
+#else
+/// The callback used for providing a PSK on the server side.
+///
+/// The callback is invoked on the event loop with the PSK hint provided by the server, and the PSK identity provided by the client.
+/// This callback must complete synchronously: it cannot return a future. Additionally, as it is invoked on the NIO event loop, it is
+/// not possible for this to perform any I/O. As a result, lookups must be quick.
+public typealias NIOPSKServerIdentityCallback = (String, String) throws -> PSKServerIdentityResponse
+#endif
 
 /// A struct that provides helpers for working with a NIOSSLCustomVerificationCallback.
 internal struct CustomVerifyManager {
