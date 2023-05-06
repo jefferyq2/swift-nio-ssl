@@ -769,7 +769,7 @@ extension NIOSSLContext {
     }
 
     /// Access cipher suites applied to the context
-    internal var cipherSuites: [NIOTLSCipher] {
+    public var cipherSuites: [NIOTLSCipher] {
         return self.withStackOfCipherSuiteBuffers { buffers in
             guard let buffers = buffers else {
                 return []

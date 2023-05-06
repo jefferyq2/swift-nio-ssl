@@ -412,7 +412,7 @@ internal final class SSLConnection {
     }
     
     /// Returns  an optional `TLSVersion` used on a `Channel` through the `NIOSSLHandler` APIs.
-    func getTLSVersionForConnection() -> TLSVersion? {
+    public func getTLSVersionForConnection() -> TLSVersion? {
         let uint16Version = CNIOBoringSSL_SSL_version(self.ssl)
         switch uint16Version {
           case TLS1_3_VERSION:
@@ -529,18 +529,6 @@ extension SSLConnection.PeerCertificateChainBuffers: RandomAccessCollection {
         // We want an UnsafeRawBufferPointer here, so we need to erase the pointer type.
         let bufferDataPointer = UnsafeBufferPointer(start: dataPointer, count: byteCount)
         return UnsafeRawBufferPointer(bufferDataPointer)
-    }
-}
-
-// MARK: - Proxyman
-
-extension SSLConnection {
-
-    func getTLSVersion() -> String? {
-        guard let rawString = CNIOBoringSSL_SSL_get_version(ssl) else {
-            return nil
-        }
-        return String(cString: rawString)
     }
 }
 

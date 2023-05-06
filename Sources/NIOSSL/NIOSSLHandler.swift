@@ -62,7 +62,7 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
     // MARK: - Proxyman Start
 
-    public var connectionOnComplete: ((_ tlsVersion: String?) -> Void)?
+    public var connectionOnComplete: ((TLSVersion?, String?) -> Void)? // tlsVersion, apln protocol
 
     // MARK: - Proxyman End
 
@@ -298,11 +298,6 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
             state = .active
 
-            // MARK: - Proxyman Start
-            let tlsVersion = connection.getTLSVersion()
-            connectionOnComplete?(tlsVersion)
-            // MARK: - Proxyman End
-
             completeHandshake(context: context)
         case .failed(let err):
             writeDataToNetwork(context: context, promise: nil)
@@ -323,7 +318,14 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
         // TODO(cory): This event should probably fire out of the BoringSSL info callback.
         let negotiatedProtocol = connection.getAlpnProtocol()
         context.fireUserInboundEventTriggered(TLSUserEvent.handshakeCompleted(negotiatedProtocol: negotiatedProtocol))
-        
+
+        // MARK: - Proxyman Start
+
+        let tlsVersion = self.tlsVersion
+        connectionOnComplete?(tlsVersion, negotiatedProtocol)
+
+        // MARK: - Proxyman End
+
         // We need to unbuffer any pending writes and reads. We will have pending writes if the user attempted to
         // write before we completed the handshake. We may also have pending reads if the user sent data immediately
         // after their FINISHED record. We decode the reads first, as those reads may trigger writes.
