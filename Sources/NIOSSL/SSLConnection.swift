@@ -544,3 +544,18 @@ extension SSLConnection {
         return Unmanaged<SSLConnection>.fromOpaque(connectionPointer).takeUnretainedValue()
     }
 }
+
+// MARK: Proxyman Start
+
+extension SSLConnection {
+
+    public func getNegotiatedCipherSuite() -> NIOTLSCipher? {
+        guard let ptr = CNIOBoringSSL_SSL_get_current_cipher(ssl) else {
+            return nil
+        }
+        let cipherID = CNIOBoringSSL_SSL_CIPHER_get_protocol_id(ptr)
+        return NIOTLSCipher(cipherID)
+    }
+}
+
+// MARK: Proxyman End

@@ -62,7 +62,7 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
     // MARK: - Proxyman Start
 
-    public var connectionOnComplete: ((TLSVersion?, String?) -> Void)? // tlsVersion, apln protocol
+    public var connectionOnComplete: ((TLSVersion?, String?, NIOTLSCipher?) -> Void)? // tlsVersion, apln protocol, negotiated cipher
 
     // MARK: - Proxyman End
 
@@ -321,7 +321,8 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
         // MARK: - Proxyman Start
 
         let tlsVersion = self.tlsVersion
-        connectionOnComplete?(tlsVersion, negotiatedProtocol)
+        let negotiatedCipherSuite = connection.getNegotiatedCipherSuite()
+        connectionOnComplete?(tlsVersion, negotiatedProtocol, negotiatedCipherSuite)
 
         // MARK: - Proxyman End
         
