@@ -317,7 +317,6 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
 
         // TODO(cory): This event should probably fire out of the BoringSSL info callback.
         let negotiatedProtocol = connection.getAlpnProtocol()
-        context.fireUserInboundEventTriggered(TLSUserEvent.handshakeCompleted(negotiatedProtocol: negotiatedProtocol))
 
         // MARK: - Proxyman Start
 
@@ -325,6 +324,8 @@ public class NIOSSLHandler : ChannelInboundHandler, ChannelOutboundHandler, Remo
         connectionOnComplete?(tlsVersion, negotiatedProtocol)
 
         // MARK: - Proxyman End
+        
+        context.fireUserInboundEventTriggered(TLSUserEvent.handshakeCompleted(negotiatedProtocol: negotiatedProtocol))
 
         // We need to unbuffer any pending writes and reads. We will have pending writes if the user attempted to
         // write before we completed the handshake. We may also have pending reads if the user sent data immediately
